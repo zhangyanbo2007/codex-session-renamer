@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Codex会话管理工具</title>
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <main class="page">
+      <header class="topbar">
+        <div>
+          <h1>Codex会话管理工具</h1>
+          {% if selected_directory %}
+          <p>{{ sessions|length }} / {{ total_count }} 条记录</p>
+          {% else %}
+          <p>{{ total_count }} 条记录</p>
+          {% endif %}
+        </div>
+        <div class="topbar-actions">
+          <form class="directory-filter" method="get" action="/">
+            <input type="hidden" name="token" value="{{ token }}">
+            <label for="directory">目录</label>
+            <select id="directory" name="directory" onchange="this.form.submit()">
+              <option value="" {% if not selected_directory %}selected{% endif %}>全部目录</option>
+              {% for option in directory_options %}
+              <option value="{{ option.directory }}" {% if option.directory == selected_directory %}selected{% endif %}>{{ option.directory }}（{{ option.count }}）</option>
+              {% endfor %}
+            </select>
+            <label for="q">搜索</label>
+            <input id="q" name="q" value="{{ search_query }}" placeholder="标题或内容">
+            <button class="secondary" type="submit">搜索</button>
+          </form>
+          <form method="post" action="/recommend-all?{{ list_query }}">
+            <button class="secondary" type="submit">一键标题推荐</button>
+          </form>
+          <form method="post" action="/auto-rename-all?{{ list_query }}">
+            <button type="submit">一键全部改名</button>
+          </form>
+        </div>
+      </header>
+
+      {% if status_message %}
+      <div class="flash success" data-auto-dismiss="true">{{ status_message }}</div>
+      {% endif %}
+
+      <section class="session-list">
+        {% for group in groups %}
+        <section class="directory-group">
+          <div class="directory-head">
+            <h2>{{ group.directory }}</h2>
+            <span>{{ group.count }} 条</span>
+          </div>
+          <div class="directory-sessions">
+            {% for row in group.rows %}
+            {% set session = row.session %}
+            <article class="session-row">
+              <div class="session-main">
+                <a class="session-title" href="/sessions/{{ session.id }}?token={{ token }}">{{ row.display_thread_name }}</a>
+                <div class="meta">
+                  <span>{{ session.updated_at }}</span>
+                  <span>{{ session.id }}</span>
+                  {% if session.log_path %}
+                  <span>{{ session.message_count }} 条消息</span>
+                  {% else %}
+                  <span>未找到日志</span>
+                  {% endif %}
+                </div>
+                {% if session.preview %}
+                <p class="preview">{{ session.preview }}</p>
+                {% endif %}
+                <div class="recommendation">
+                  <span>推荐标题</span>
+                  <strong>{{ row.suggested_title }}</strong>
+                </div>
+                <form class="inline-rename" method="post" action="/sessions/{{ session.id }}/rename?{{ list_query }}&next=list">
+                  <input name="thread_name" value="{{ row.rename_value }}" maxlength="120" aria-label="新会话名">
+                  <button class="secondary" type="submit">单会话改名</button>
+                </form>
+                <form class="delete-form" method="post" action="/sessions/{{ session.id }}/delete?{{ list_query }}" onsubmit="return confirm('确认删除这个会话？日志会移入 trash，索引会备份。')">
+                  <button class="danger" type="submit">删除会话</button>
+                </form>
+              </div>
+            </article>
+            {% endfor %}
+          </div>
+        </section>
+        {% else %}
+        <p class="empty">没有可展示的会话记录。</p>
+        {% endfor %}
+      </section>
+    </main>
+    <script>
+      (() => {
+        const flash = document.querySelector('[data-auto-dismiss="true"]');
+        if (!flash) return;
+        const url = new URL(window.location.href);
+        if (url.searchParams.has('status')) {
+          url.searchParams.delete('status');
+          const nextUrl = url.pathname + (url.search ? url.search : '') + url.hash;
+          window.history.replaceState(null, '', nextUrl);
+        }
+        window.setTimeout(() => {
+          flash.hidden = true;
+        }, 3200);
+      })();
+    </script>
+  </body>
+</html>
