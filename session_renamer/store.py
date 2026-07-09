@@ -228,7 +228,8 @@ class SessionStore:
         raise KeyError(f"session id not found: {session_id}")
 
     def _read_session_records(self) -> list[dict[str, Any]]:
-        records_by_id = {str(record["id"]): record for record in self._read_index_records()}
+        index_records = {str(record["id"]): record for record in self._read_index_records()}
+        records_by_id = dict(index_records)
         sqlite_ids, sqlite_records = self._read_state_thread_records()
         if sqlite_ids:
             records_by_id = {
@@ -236,7 +237,20 @@ class SessionStore:
                 for session_id, record in records_by_id.items()
                 if session_id not in sqlite_ids
             }
-            records_by_id.update({str(record["id"]): record for record in sqlite_records})
+            for record in sqlite_records:
+                session_id = str(record["id"])
+                index_record = index_records.get(session_id)
+                if index_record:
+                    merged = dict(record)
+                    index_title = str(index_record.get("thread_name", "")).strip()
+                    if index_title:
+                        merged["thread_name"] = index_title
+                    index_cwd = str(index_record.get("cwd", "")).strip()
+                    if index_cwd and not str(merged.get("cwd", "")).strip():
+                        merged["cwd"] = index_cwd
+                    records_by_id[session_id] = merged
+                else:
+                    records_by_id[session_id] = record
         return sorted(
             records_by_id.values(),
             key=lambda record: int(record.get("sort_key", 0)),

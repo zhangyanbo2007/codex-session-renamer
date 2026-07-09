@@ -191,6 +191,43 @@ class SessionStoreTest(unittest.TestCase):
         self.assertEqual(sessions[0].preview, "较新预览")
         self.assertEqual(sessions[0].cwd, "/work/new")
 
+    def test_list_sessions_prefers_index_title_when_sqlite_title_has_reverted(self):
+        self.write_index(
+            [
+                {
+                    "id": "renamed",
+                    "thread_name": "alpha｜已命名总览｜已命名近况",
+                    "updated_at": "2026-07-08T01:02:03Z",
+                    "cwd": "/work/alpha",
+                }
+            ]
+        )
+        log_path = self.write_log("renamed", [])
+        self.write_state_threads(
+            [
+                (
+                    "renamed",
+                    str(log_path),
+                    1783600000,
+                    1783600000,
+                    "live state reverted to original title",
+                    0,
+                    "user",
+                    "live preview",
+                    1783600000000,
+                    "/work/alpha",
+                )
+            ]
+        )
+
+        sessions = SessionStore(self.index_path, self.codex_home).list_sessions()
+
+        self.assertEqual(sessions[0].id, "renamed")
+        self.assertEqual(
+            sessions[0].thread_name,
+            "alpha｜已命名总览｜已命名近况",
+        )
+
     def test_rename_session_updates_sqlite_only_thread(self):
         self.write_index([])
         log_path = self.write_log("sqlite-only", [])

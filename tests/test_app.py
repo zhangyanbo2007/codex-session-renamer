@@ -6,6 +6,7 @@ import unittest
 import warnings
 import asyncio
 import inspect
+import sqlite3
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -267,6 +268,61 @@ class AppTest(unittest.TestCase):
         self.assertNotIn("条未改名", text)
         self.assertEqual(text.count('class="status-badge needs-rename"'), 2)
         self.assertIn(">未改名</span>", text)
+
+    def test_list_page_keeps_manual_index_title_when_sqlite_title_has_reverted(self):
+        text = self.index_path.read_text(encoding="utf-8")
+        self.index_path.write_text(
+            text.replace('"thread_name": "旧标题"', '"thread_name": "alpha｜已命名总览｜已命名近况"'),
+            encoding="utf-8",
+        )
+        state_path = self.codex_home / "state_5.sqlite"
+        with sqlite3.connect(state_path) as conn:
+            conn.execute(
+                """
+                create table threads (
+                    id text primary key,
+                    rollout_path text,
+                    created_at integer,
+                    updated_at integer,
+                    title text,
+                    archived integer,
+                    thread_source text,
+                    preview text,
+                    updated_at_ms integer,
+                    cwd text
+                )
+                """
+            )
+            conn.execute("create table thread_dynamic_tools (thread_id text)")
+            conn.execute(
+                "create table thread_spawn_edges (parent_thread_id text, child_thread_id text)"
+            )
+            conn.execute(
+                """
+                insert into threads (
+                    id, rollout_path, created_at, updated_at, title, archived,
+                    thread_source, preview, updated_at_ms, cwd
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "abc123",
+                    str(self.codex_home / "sessions" / "2026" / "07" / "08" / "rollout-2026-07-08T00-00-00-abc123.jsonl"),
+                    1783500000,
+                    1783500000,
+                    "live reverted title",
+                    0,
+                    "user",
+                    "live preview",
+                    1783500000000,
+                    "/work/alpha",
+                ),
+            )
+
+        response = self.call_endpoint("/", method="GET")
+        text = self.response_text(response)
+
+        self.assertIn("alpha｜已命名总览｜已命名近况", text)
+        self.assertNotIn("live reverted title", text)
 
     def test_list_page_does_not_mark_model_shaped_title_as_unrenamed(self):
         text = self.index_path.read_text(encoding="utf-8")
