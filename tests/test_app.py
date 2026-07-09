@@ -542,6 +542,13 @@ class AppTest(unittest.TestCase):
         self.assertIn("第二个旧标题", text)
         self.assertNotIn("abc123", text)
 
+    def test_search_input_has_no_implicit_default_or_browser_autocomplete(self):
+        response = self.call_endpoint("/", method="GET")
+        text = self.response_text(response)
+
+        self.assertIn('id="q" name="q" value="" placeholder="标题或内容" autocomplete="off"', text)
+        self.assertNotIn('value="studio"', text)
+
     def test_list_page_can_search_by_message_content(self):
         query_string = urlencode({"token": "secret", "q": "会话改名"})
         response = self.call_endpoint("/", method="GET", query_string=query_string)
