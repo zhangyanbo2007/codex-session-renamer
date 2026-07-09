@@ -354,9 +354,65 @@ class AppTest(unittest.TestCase):
         self.assertIn("alpha｜Codex会话管理工具｜Codex会话管理工具", text)
         self.assertNotIn("beta｜这是一个测试｜这是一个测试</a>", text)
 
+    def test_passive_list_view_does_not_clear_changed_filter(self):
+        self.call_endpoint("/auto-rename-all")
+        log_path = self.codex_home / "sessions" / "2026" / "07" / "08" / "rollout-2026-07-08T00-00-00-abc123.jsonl"
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-08T01:05:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "新增：普通查看不应清除变化"}],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        passive_response = self.call_endpoint("/", method="GET")
+        self.response_text(passive_response)
+        query_string = urlencode({"token": "secret", "changed": "1"})
+
+        response = self.call_endpoint("/", method="GET", query_string=query_string)
+        text = self.response_text(response, query_string=query_string.encode("utf-8"))
+
+        self.assertIn("alpha｜Codex会话管理工具｜Codex会话管理工具", text)
+        self.assertNotIn("没有可展示的会话记录", text)
+
+    def test_changed_filter_view_does_not_clear_changed_filter(self):
+        self.call_endpoint("/auto-rename-all")
+        log_path = self.codex_home / "sessions" / "2026" / "07" / "08" / "rollout-2026-07-08T00-00-00-abc123.jsonl"
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-08T01:05:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "新增：变化筛选不应清除变化"}],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        query_string = urlencode({"token": "secret", "changed": "1"})
+        first_response = self.call_endpoint("/", method="GET", query_string=query_string)
+        first_text = self.response_text(first_response, query_string=query_string.encode("utf-8"))
+
+        second_response = self.call_endpoint("/", method="GET", query_string=query_string)
+        second_text = self.response_text(second_response, query_string=query_string.encode("utf-8"))
+
+        self.assertIn("alpha｜Codex会话管理工具｜Codex会话管理工具", first_text)
+        self.assertIn("alpha｜Codex会话管理工具｜Codex会话管理工具", second_text)
+        self.assertNotIn("没有可展示的会话记录", second_text)
+
     def test_changed_filter_excludes_unchanged_sessions_that_only_need_rename(self):
-        first_response = self.call_endpoint("/", method="GET")
-        self.response_text(first_response)
+        self.call_endpoint("/recommend-all")
         query_string = urlencode({"token": "secret", "changed": "1"})
 
         response = self.call_endpoint("/", method="GET", query_string=query_string)
@@ -392,8 +448,7 @@ class AppTest(unittest.TestCase):
                 access_token="secret",
                 title_generator=FixedTitleGenerator("外部刷新｜最近状态"),
             )
-            external_response = self.call_endpoint("/", method="GET")
-            self.response_text(external_response)
+            self.call_endpoint("/recommend-all")
         finally:
             self.app = original_app
 
@@ -418,8 +473,7 @@ class AppTest(unittest.TestCase):
             access_token="secret",
             title_generator=generator,
         )
-        first_response = self.call_endpoint("/", method="GET")
-        self.response_text(first_response)
+        self.call_endpoint("/recommend-all")
         self.assertEqual(generator.calls, 2)
 
         text = self.index_path.read_text(encoding="utf-8")
@@ -733,8 +787,7 @@ class AppTest(unittest.TestCase):
             access_token="secret",
             title_generator=FixedTitleGenerator("缓存标题｜最近状态"),
         )
-        first_response = self.call_endpoint("/", method="GET")
-        self.response_text(first_response)
+        self.call_endpoint("/recommend-all")
 
         self.app = create_app(
             store=store,

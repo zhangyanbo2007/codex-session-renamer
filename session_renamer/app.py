@@ -91,7 +91,7 @@ def create_app(
             if selected_changed and not conversation_changed:
                 continue
             suggested_title = (
-                suggested_title_for(detail)
+                suggested_title_for(detail, persist=False)
                 if needs_summary
                 else _sanitize_title(session.thread_name)
             )
@@ -219,7 +219,7 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
         refresh_title_cache_from_disk()
-        suggested_title = suggested_title_for(detail)
+        suggested_title = suggested_title_for(detail, persist=False)
         can_use_suggestion = _is_actionable_title(suggested_title)
         response = TEMPLATES.TemplateResponse(
             request,
@@ -244,7 +244,9 @@ def create_app(
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
         refresh_title_cache_from_disk()
-        return _with_no_store(JSONResponse({"suggested_title": suggested_title_for(detail)}))
+        return _with_no_store(
+            JSONResponse({"suggested_title": suggested_title_for(detail, persist=False)})
+        )
 
     @app.post("/sessions/{session_id}/rename")
     async def rename(request: Request, session_id: str) -> RedirectResponse:
@@ -356,7 +358,7 @@ def create_app(
             app.state.title_cache = _load_title_cache(app.state.title_cache_path)
             return dict(app.state.title_cache)
 
-    def suggested_title_for(detail, refresh: bool = False) -> str:
+    def suggested_title_for(detail, refresh: bool = False, persist: bool = True) -> str:
         cache_key = _title_cache_key(detail)
         cached = None
         if not refresh:
@@ -369,9 +371,10 @@ def create_app(
         except Exception:
             raw_title = detail.thread_name
         title = _content_title_for_directory(raw_title, detail.cwd)
-        with app.state.title_cache_lock:
-            app.state.title_cache[cache_key] = title
-            _save_title_cache(app.state.title_cache_path, app.state.title_cache)
+        if persist:
+            with app.state.title_cache_lock:
+                app.state.title_cache[cache_key] = title
+                _save_title_cache(app.state.title_cache_path, app.state.title_cache)
         return _title_with_directory_prefix(detail.cwd, title)
 
     def suggested_titles_for(details) -> dict[str, str]:
