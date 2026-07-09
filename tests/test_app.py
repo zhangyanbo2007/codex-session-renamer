@@ -354,6 +354,62 @@ class AppTest(unittest.TestCase):
         self.assertIn("alpha｜Codex会话管理工具｜Codex会话管理工具", text)
         self.assertNotIn("beta｜这是一个测试｜这是一个测试</a>", text)
 
+    def test_changed_filter_excludes_unchanged_sessions_that_only_need_rename(self):
+        first_response = self.call_endpoint("/", method="GET")
+        self.response_text(first_response)
+        query_string = urlencode({"token": "secret", "changed": "1"})
+
+        response = self.call_endpoint("/", method="GET", query_string=query_string)
+        text = self.response_text(response, query_string=query_string.encode("utf-8"))
+
+        self.assertIn("没有可展示的会话记录", text)
+        self.assertNotIn("旧标题</a>", text)
+        self.assertNotIn("第二个旧标题</a>", text)
+
+    def test_changed_filter_reloads_title_cache_written_by_another_process(self):
+        self.call_endpoint("/auto-rename-all")
+        log_path = self.codex_home / "sessions" / "2026" / "07" / "08" / "rollout-2026-07-08T00-00-00-abc123.jsonl"
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-08T01:05:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "外部进程新增内容"}],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+        original_app = self.app
+        try:
+            self.app = create_app(
+                store=SessionStore(self.index_path, self.codex_home),
+                access_token="secret",
+                title_generator=FixedTitleGenerator("外部刷新｜最近状态"),
+            )
+            external_response = self.call_endpoint("/", method="GET")
+            self.response_text(external_response)
+        finally:
+            self.app = original_app
+
+        query_string = urlencode({"token": "secret", "changed": "1"})
+        response = self.call_endpoint("/", method="GET", query_string=query_string)
+        text = self.response_text(response, query_string=query_string.encode("utf-8"))
+
+        self.assertIn("没有可展示的会话记录", text)
+        self.assertNotIn("abc123", text)
+
+    def test_list_page_disables_browser_cache_for_realtime_filters(self):
+        response = self.call_endpoint("/", method="GET")
+
+        self.assertIn("no-store", response.headers["cache-control"])
+        self.assertEqual(response.headers["pragma"], "no-cache")
+
     def test_title_cache_is_not_invalidated_by_title_change_only(self):
         generator = CountingTitleGenerator("缓存标题｜最近状态")
         store = SessionStore(self.index_path, self.codex_home)
@@ -656,6 +712,19 @@ class AppTest(unittest.TestCase):
         self.assertIn("已改名会话", text)
         self.assertIn('data-auto-dismiss="true"', text)
         self.assertIn("searchParams.delete('status')", text)
+
+    def test_detail_page_omits_redundant_auto_rename_button(self):
+        response = self.call_endpoint(
+            "/sessions/{session_id}",
+            method="GET",
+            session_id="abc123",
+        )
+        text = self.response_text(response, path="/sessions/abc123")
+
+        self.assertIn(">保存</button>", text)
+        self.assertIn("推荐标题：", text)
+        self.assertNotIn("使用建议并保存", text)
+        self.assertNotIn("/sessions/abc123/auto-rename", text)
 
     def test_list_page_reuses_persistent_title_cache_after_restart(self):
         store = SessionStore(self.index_path, self.codex_home)

@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -71,6 +71,7 @@ def create_app(
             selected_changed,
             sessions,
             details,
+            title_cache,
         ) = list_state_for_request(request)
         rows = []
         list_query = _list_query(
@@ -83,11 +84,11 @@ def create_app(
         for session in sessions:
             detail = details[session.id]
             needs_model_rename = _needs_model_rename(session.thread_name, session.cwd)
-            conversation_changed = _conversation_changed(detail, app.state.title_cache)
+            conversation_changed = _conversation_changed(detail, title_cache)
             needs_summary = needs_model_rename or conversation_changed
             if selected_needs_rename and not needs_model_rename:
                 continue
-            if selected_changed and not needs_summary:
+            if selected_changed and not conversation_changed:
                 continue
             suggested_title = (
                 suggested_title_for(detail)
@@ -109,7 +110,7 @@ def create_app(
             )
         sessions = [row["session"] for row in rows]
         groups = _build_directory_groups(rows)
-        return TEMPLATES.TemplateResponse(
+        response = TEMPLATES.TemplateResponse(
             request,
             "index.html",
             {
@@ -127,6 +128,7 @@ def create_app(
                 "token": current_token,
             },
         )
+        return _with_no_store(response)
 
     @app.post("/auto-rename-all")
     async def auto_rename_all(request: Request) -> RedirectResponse:
@@ -140,20 +142,19 @@ def create_app(
             selected_changed,
             sessions,
             details,
+            title_cache,
         ) = list_state_for_request(request)
         titles_by_id: dict[str, str] = {}
         for session in sessions:
             detail = details[session.id]
             needs_model_rename = _needs_model_rename(session.thread_name, session.cwd)
-            needs_summary = needs_model_rename or _conversation_changed(
-                detail,
-                app.state.title_cache,
-            )
+            conversation_changed = _conversation_changed(detail, title_cache)
+            needs_summary = needs_model_rename or conversation_changed
             if selected_needs_rename and not needs_model_rename:
                 continue
-            if selected_changed and not needs_summary:
+            if selected_changed and not conversation_changed:
                 continue
-            suggested_title = suggested_title_for(detail)
+            suggested_title = suggested_title_for(detail, refresh=conversation_changed)
             if _is_actionable_title(suggested_title):
                 titles_by_id[session.id] = suggested_title
         try:
@@ -186,19 +187,18 @@ def create_app(
             selected_changed,
             sessions,
             details,
+            title_cache,
         ) = list_state_for_request(request)
         for session in sessions:
             detail = details[session.id]
             needs_model_rename = _needs_model_rename(session.thread_name, session.cwd)
-            needs_summary = needs_model_rename or _conversation_changed(
-                detail,
-                app.state.title_cache,
-            )
+            conversation_changed = _conversation_changed(detail, title_cache)
+            needs_summary = needs_model_rename or conversation_changed
             if selected_needs_rename and not needs_model_rename:
                 continue
-            if selected_changed and not needs_summary:
+            if selected_changed and not conversation_changed:
                 continue
-            suggested_title_for(detail, refresh=_conversation_changed(detail, app.state.title_cache))
+            suggested_title_for(detail, refresh=conversation_changed)
         return RedirectResponse(
             url=_list_url(
                 current_token,
@@ -218,9 +218,10 @@ def create_app(
             detail = app.state.store.get_session(session_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
+        refresh_title_cache_from_disk()
         suggested_title = suggested_title_for(detail)
         can_use_suggestion = _is_actionable_title(suggested_title)
-        return TEMPLATES.TemplateResponse(
+        response = TEMPLATES.TemplateResponse(
             request,
             "session.html",
             {
@@ -233,6 +234,7 @@ def create_app(
                 "token": current_token,
             },
         )
+        return _with_no_store(response)
 
     @app.get("/api/sessions/{session_id}/suggest")
     def suggest(request: Request, session_id: str) -> JSONResponse:
@@ -241,7 +243,8 @@ def create_app(
             detail = app.state.store.get_session(session_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
-        return JSONResponse({"suggested_title": suggested_title_for(detail)})
+        refresh_title_cache_from_disk()
+        return _with_no_store(JSONResponse({"suggested_title": suggested_title_for(detail)}))
 
     @app.post("/sessions/{session_id}/rename")
     async def rename(request: Request, session_id: str) -> RedirectResponse:
@@ -280,6 +283,7 @@ def create_app(
         current_token = require_token(request)
         try:
             detail = app.state.store.get_session(session_id)
+            refresh_title_cache_from_disk()
             suggested_title = suggested_title_for(detail)
             if _is_actionable_title(suggested_title):
                 app.state.store.rename_session(session_id, suggested_title)
@@ -315,6 +319,7 @@ def create_app(
 
     def list_state_for_request(request: Request):
         all_sessions = app.state.store.list_sessions()
+        title_cache = refresh_title_cache_from_disk()
         directory_options = _build_directory_options(all_sessions)
         selected_directory = _selected_directory(
             request.query_params.get("directory", ""),
@@ -343,7 +348,13 @@ def create_app(
             selected_changed,
             sessions,
             details,
+            title_cache,
         )
+
+    def refresh_title_cache_from_disk() -> dict[str, str]:
+        with app.state.title_cache_lock:
+            app.state.title_cache = _load_title_cache(app.state.title_cache_path)
+            return dict(app.state.title_cache)
 
     def suggested_title_for(detail, refresh: bool = False) -> str:
         cache_key = _title_cache_key(detail)
@@ -412,6 +423,13 @@ def _save_title_cache(path: Path, cache: dict[str, str]) -> None:
         encoding="utf-8",
     )
     os.replace(tmp_path, path)
+
+
+def _with_no_store(response: Response) -> Response:
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 def _title_cache_key(detail) -> str:
