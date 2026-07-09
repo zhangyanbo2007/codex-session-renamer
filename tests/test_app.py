@@ -1,4 +1,5 @@
 import json
+import html
 import sys
 import tempfile
 import unittest
@@ -25,6 +26,16 @@ class FixedTitleGenerator:
         self.title = title
 
     def suggest(self, messages, fallback):
+        return self.title
+
+
+class CountingTitleGenerator:
+    def __init__(self, title):
+        self.title = title
+        self.calls = 0
+
+    def suggest(self, messages, fallback):
+        self.calls += 1
         return self.title
 
 
@@ -247,6 +258,149 @@ class AppTest(unittest.TestCase):
         self.assertIn("一键全部改名", text)
         self.assertIn("一键标题推荐", text)
         self.assertIn("删除会话", text)
+
+    def test_list_page_marks_sessions_not_using_model_title(self):
+        response = self.call_endpoint("/", method="GET")
+        text = self.response_text(response)
+
+        self.assertIn("只看未改名", text)
+        self.assertNotIn("条未改名", text)
+        self.assertEqual(text.count('class="status-badge needs-rename"'), 2)
+        self.assertIn(">未改名</span>", text)
+
+    def test_list_page_does_not_mark_model_shaped_title_as_unrenamed(self):
+        text = self.index_path.read_text(encoding="utf-8")
+        self.index_path.write_text(
+            text.replace('"thread_name": "旧标题"', '"thread_name": "alpha｜已命名总览｜已命名近况"'),
+            encoding="utf-8",
+        )
+
+        response = self.call_endpoint("/", method="GET")
+        text = self.response_text(response)
+
+        self.assertIn("alpha｜已命名总览｜已命名近况", text)
+        self.assertEqual(text.count('class="status-badge needs-rename"'), 1)
+
+    def test_list_page_hides_model_rename_marker_after_auto_rename(self):
+        self.call_endpoint("/auto-rename-all")
+
+        response = self.call_endpoint("/", method="GET")
+        text = self.response_text(response)
+
+        self.assertNotIn('class="status-badge needs-rename"', text)
+
+    def test_list_page_can_filter_to_sessions_not_using_model_title(self):
+        self.call_endpoint(
+            "/sessions/{session_id}/auto-rename",
+            session_id="def456",
+        )
+        query_string = urlencode({"token": "secret", "needs_rename": "1"})
+
+        response = self.call_endpoint("/", method="GET", query_string=query_string)
+        text = self.response_text(response, query_string=query_string.encode("utf-8"))
+
+        self.assertIn("旧标题", text)
+        self.assertNotIn("第二个旧标题", text)
+        self.assertIn('class="filter-toggle active"', text)
+        self.assertIn("释放未改名", text)
+        self.assertNotIn('type="checkbox"', text)
+
+    def test_list_page_preserves_unrenamed_filter_in_actions(self):
+        query_string = urlencode({"token": "secret", "needs_rename": "1"})
+
+        response = self.call_endpoint("/", method="GET", query_string=query_string)
+        text = self.response_text(response, query_string=query_string.encode("utf-8"))
+        decoded = html.unescape(text)
+
+        self.assertIn("/recommend-all?token=secret&needs_rename=1", decoded)
+        self.assertIn("/auto-rename-all?token=secret&needs_rename=1", decoded)
+        self.assertIn("/sessions/abc123/rename?token=secret&needs_rename=1&next=list", decoded)
+
+    def test_unrenamed_filter_toggle_preserves_directory_and_search(self):
+        query_string = urlencode({"token": "secret", "directory": "/work/alpha", "q": "会话改名"})
+
+        response = self.call_endpoint("/", method="GET", query_string=query_string)
+        text = self.response_text(response, query_string=query_string.encode("utf-8"))
+
+        self.assertIn('name="directory" value="/work/alpha"', text)
+        self.assertIn('name="q" value="会话改名"', text)
+        self.assertIn('name="needs_rename" value="1"', text)
+
+    def test_changed_filter_shows_sessions_with_new_conversation_content(self):
+        self.call_endpoint("/", method="GET")
+        self.call_endpoint("/auto-rename-all")
+        log_path = self.codex_home / "sessions" / "2026" / "07" / "08" / "rollout-2026-07-08T00-00-00-abc123.jsonl"
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-08T01:05:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "新增：会话内容变化"}],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        query_string = urlencode({"token": "secret", "changed": "1"})
+
+        response = self.call_endpoint("/", method="GET", query_string=query_string)
+        text = self.response_text(response, query_string=query_string.encode("utf-8"))
+
+        self.assertIn("释放会话变化", text)
+        self.assertIn("alpha｜Codex会话管理工具｜Codex会话管理工具", text)
+        self.assertNotIn("beta｜这是一个测试｜这是一个测试</a>", text)
+
+    def test_title_cache_is_not_invalidated_by_title_change_only(self):
+        generator = CountingTitleGenerator("缓存标题｜最近状态")
+        store = SessionStore(self.index_path, self.codex_home)
+        self.app = create_app(
+            store=store,
+            access_token="secret",
+            title_generator=generator,
+        )
+        first_response = self.call_endpoint("/", method="GET")
+        self.response_text(first_response)
+        self.assertEqual(generator.calls, 2)
+
+        text = self.index_path.read_text(encoding="utf-8")
+        self.index_path.write_text(
+            text.replace('"thread_name": "旧标题"', '"thread_name": "alpha｜已命名总览｜已命名近况"'),
+            encoding="utf-8",
+        )
+        second_response = self.call_endpoint("/", method="GET")
+        self.response_text(second_response)
+
+        self.assertEqual(generator.calls, 2)
+
+    def test_list_page_places_delete_action_right_of_inline_rename(self):
+        response = self.call_endpoint("/", method="GET")
+        text = self.response_text(response)
+
+        self.assertIn('class="row-actions"', text)
+        self.assertIn('class="delete-form inline-delete"', text)
+        self.assertLess(text.index('class="inline-rename"'), text.index('class="delete-form inline-delete"'))
+
+    def test_list_page_places_actions_below_page_title(self):
+        response = self.call_endpoint("/", method="GET")
+        text = self.response_text(response)
+
+        self.assertIn('class="topbar-title"', text)
+        self.assertIn('class="topbar-actions"', text)
+        self.assertLess(text.index('class="topbar-title"'), text.index('class="topbar-actions"'))
+
+    def test_list_page_places_bulk_actions_on_right_side_of_toolbar(self):
+        response = self.call_endpoint("/", method="GET")
+        text = self.response_text(response)
+
+        self.assertIn('class="bulk-actions"', text)
+        self.assertLess(text.index('class="directory-filter"'), text.index('class="bulk-actions"'))
+        self.assertLess(text.index("只看未改名"), text.index("一键标题推荐"))
+        self.assertLess(text.index("只看会话变化"), text.index("一键标题推荐"))
+        self.assertLess(text.index("一键标题推荐"), text.index("一键全部改名"))
 
     def test_list_page_groups_sessions_by_directory_in_recent_order(self):
         response = self.call_endpoint("/", method="GET")

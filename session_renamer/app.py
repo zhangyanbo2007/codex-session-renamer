@@ -67,14 +67,33 @@ def create_app(
             directory_options,
             selected_directory,
             search_query,
+            selected_needs_rename,
+            selected_changed,
             sessions,
             details,
         ) = list_state_for_request(request)
-        suggested_titles = suggested_titles_for(list(details.values()))
         rows = []
-        list_query = _list_query(current_token, selected_directory, search_query)
+        list_query = _list_query(
+            current_token,
+            selected_directory,
+            search_query,
+            needs_rename=selected_needs_rename,
+            changed=selected_changed,
+        )
         for session in sessions:
-            suggested_title = suggested_titles.get(session.id, _sanitize_title(session.thread_name))
+            detail = details[session.id]
+            needs_model_rename = _needs_model_rename(session.thread_name, session.cwd)
+            conversation_changed = _conversation_changed(detail, app.state.title_cache)
+            needs_summary = needs_model_rename or conversation_changed
+            if selected_needs_rename and not needs_model_rename:
+                continue
+            if selected_changed and not needs_summary:
+                continue
+            suggested_title = (
+                suggested_title_for(detail)
+                if needs_summary
+                else _sanitize_title(session.thread_name)
+            )
             can_use_suggestion = _is_actionable_title(suggested_title)
             rows.append(
                 {
@@ -83,8 +102,12 @@ def create_app(
                     "suggested_title": suggested_title,
                     "rename_value": _rename_value(suggested_title, session.thread_name),
                     "can_use_suggestion": can_use_suggestion,
+                    "needs_model_rename": needs_model_rename,
+                    "conversation_changed": conversation_changed,
+                    "needs_summary": needs_summary,
                 }
             )
+        sessions = [row["session"] for row in rows]
         groups = _build_directory_groups(rows)
         return TEMPLATES.TemplateResponse(
             request,
@@ -99,6 +122,8 @@ def create_app(
                 "search_query": search_query,
                 "status_message": _status_message(request.query_params.get("status", "")),
                 "list_query": list_query,
+                "selected_needs_rename": selected_needs_rename,
+                "selected_changed": selected_changed,
                 "token": current_token,
             },
         )
@@ -111,12 +136,23 @@ def create_app(
             _directory_options,
             selected_directory,
             search_query,
+            selected_needs_rename,
+            selected_changed,
             sessions,
             details,
         ) = list_state_for_request(request)
         titles_by_id: dict[str, str] = {}
         for session in sessions:
             detail = details[session.id]
+            needs_model_rename = _needs_model_rename(session.thread_name, session.cwd)
+            needs_summary = needs_model_rename or _conversation_changed(
+                detail,
+                app.state.title_cache,
+            )
+            if selected_needs_rename and not needs_model_rename:
+                continue
+            if selected_changed and not needs_summary:
+                continue
             suggested_title = suggested_title_for(detail)
             if _is_actionable_title(suggested_title):
                 titles_by_id[session.id] = suggested_title
@@ -131,6 +167,8 @@ def create_app(
                 current_token,
                 selected_directory,
                 search_query,
+                needs_rename=selected_needs_rename,
+                changed=selected_changed,
                 status="renamed_all",
             ),
             status_code=303,
@@ -144,14 +182,32 @@ def create_app(
             _directory_options,
             selected_directory,
             search_query,
+            selected_needs_rename,
+            selected_changed,
             sessions,
             details,
         ) = list_state_for_request(request)
         for session in sessions:
             detail = details[session.id]
-            suggested_title_for(detail, refresh=True)
+            needs_model_rename = _needs_model_rename(session.thread_name, session.cwd)
+            needs_summary = needs_model_rename or _conversation_changed(
+                detail,
+                app.state.title_cache,
+            )
+            if selected_needs_rename and not needs_model_rename:
+                continue
+            if selected_changed and not needs_summary:
+                continue
+            suggested_title_for(detail, refresh=_conversation_changed(detail, app.state.title_cache))
         return RedirectResponse(
-            url=_list_url(current_token, selected_directory, search_query, status="recommended"),
+            url=_list_url(
+                current_token,
+                selected_directory,
+                search_query,
+                needs_rename=selected_needs_rename,
+                changed=selected_changed,
+                status="recommended",
+            ),
             status_code=303,
         )
 
@@ -206,6 +262,10 @@ def create_app(
                     current_token,
                     request.query_params.get("directory", ""),
                     request.query_params.get("q", ""),
+                    needs_rename=_selected_needs_rename(
+                        request.query_params.get("needs_rename", "")
+                    ),
+                    changed=_selected_changed(request.query_params.get("changed", "")),
                     status="renamed",
                 ),
                 status_code=303,
@@ -244,6 +304,10 @@ def create_app(
                 current_token,
                 request.query_params.get("directory", ""),
                 request.query_params.get("q", ""),
+                needs_rename=_selected_needs_rename(
+                    request.query_params.get("needs_rename", "")
+                ),
+                changed=_selected_changed(request.query_params.get("changed", "")),
                 status="deleted",
             ),
             status_code=303,
@@ -257,6 +321,10 @@ def create_app(
             directory_options,
         )
         search_query = _search_query(request.query_params.get("q", ""))
+        selected_needs_rename = _selected_needs_rename(
+            request.query_params.get("needs_rename", "")
+        )
+        selected_changed = _selected_changed(request.query_params.get("changed", ""))
         directory_sessions = _filter_sessions_by_directory(all_sessions, selected_directory)
         details = {}
         for session in directory_sessions:
@@ -271,6 +339,8 @@ def create_app(
             directory_options,
             selected_directory,
             search_query,
+            selected_needs_rename,
+            selected_changed,
             sessions,
             details,
         )
@@ -345,13 +415,15 @@ def _save_title_cache(path: Path, cache: dict[str, str]) -> None:
 
 
 def _title_cache_key(detail) -> str:
+    messages = [
+        [message.role, message.timestamp or "", message.text]
+        for message in getattr(detail, "messages", [])
+    ]
     payload = [
-        "v4-skip-first-user",
+        "v5-conversation-content",
         detail.id,
-        detail.updated_at,
-        detail.thread_name,
-        len(detail.messages),
-        detail.preview[:240],
+        messages,
+        getattr(detail, "preview", ""),
     ]
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -460,6 +532,24 @@ def _rename_value(suggested_title: str, current_title: str) -> str:
     return current_title
 
 
+def _needs_model_rename(current_title: str, cwd: str = "") -> bool:
+    return not _is_model_renamed_title(current_title, cwd)
+
+
+def _is_model_renamed_title(title: str, cwd: str = "") -> bool:
+    parts = _title_parts(title)
+    if len(parts) < 3:
+        return False
+    directory = _directory_title_component(cwd)
+    if parts[0] != directory:
+        return False
+    return all(_is_actionable_title(part) for part in parts[:3])
+
+
+def _conversation_changed(detail, title_cache: dict[str, str]) -> bool:
+    return _title_cache_key(detail) not in title_cache
+
+
 def _build_directory_groups(rows):
     groups_by_directory = {}
     for row in rows:
@@ -514,6 +604,14 @@ def _search_query(raw_query: str) -> str:
     return " ".join(str(raw_query or "").strip().split())
 
 
+def _selected_needs_rename(raw_value: str) -> bool:
+    return str(raw_value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _selected_changed(raw_value: str) -> bool:
+    return str(raw_value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _filter_sessions_by_search(sessions, details_by_id, search_query: str):
     if not search_query:
         return sessions
@@ -555,6 +653,8 @@ def _list_query(
     token: str,
     directory: str = "",
     search_query: str = "",
+    needs_rename: bool = False,
+    changed: bool = False,
     status: str = "",
 ) -> str:
     values = [("token", token)]
@@ -562,6 +662,10 @@ def _list_query(
         values.append(("directory", directory))
     if search_query:
         values.append(("q", _search_query(search_query)))
+    if needs_rename:
+        values.append(("needs_rename", "1"))
+    if changed:
+        values.append(("changed", "1"))
     if status:
         values.append(("status", status))
     return urlencode(values)
@@ -571,9 +675,11 @@ def _list_url(
     token: str,
     directory: str = "",
     search_query: str = "",
+    needs_rename: bool = False,
+    changed: bool = False,
     status: str = "",
 ) -> str:
-    return f"/?{_list_query(token, directory, search_query, status)}"
+    return f"/?{_list_query(token, directory, search_query, needs_rename, changed, status)}"
 
 
 def _session_url(session_id: str, token: str, status: str = "") -> str:
