@@ -546,7 +546,11 @@ class AppTest(unittest.TestCase):
         response = self.call_endpoint("/", method="GET")
         text = self.response_text(response)
 
-        self.assertIn('id="q" name="q" value="" placeholder="标题或内容" autocomplete="off"', text)
+        self.assertIn('id="session-search" name="session_search_display" value=""', text)
+        self.assertIn('autocomplete="new-password"', text)
+        self.assertIn('id="search-query-param" name="q" value=""', text)
+        self.assertIn("url.searchParams.has('q')", text)
+        self.assertIn("searchInput.value = initialQuery", text)
         self.assertNotIn('value="studio"', text)
 
     def test_list_page_can_search_by_message_content(self):

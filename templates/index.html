@@ -35,8 +35,9 @@
               <option value="{{ option.directory }}" {% if option.directory == selected_directory %}selected{% endif %}>{{ option.directory }}（{{ option.count }}）</option>
               {% endfor %}
             </select>
-            <label for="q">搜索</label>
-            <input id="q" name="q" value="{{ search_query }}" placeholder="标题或内容" autocomplete="off">
+            <label for="session-search">搜索</label>
+            <input id="session-search" name="session_search_display" value="{{ search_query }}" placeholder="标题或内容" autocomplete="new-password" autocapitalize="none" spellcheck="false" data-session-search-input>
+            <input type="hidden" id="search-query-param" name="q" value="{{ search_query }}" data-session-search-param>
             <button class="secondary" type="submit">搜索</button>
           </form>
           <div class="bulk-actions">
@@ -148,6 +149,37 @@
     </main>
     <script>
       (() => {
+        const searchInput = document.querySelector('[data-session-search-input]');
+        const searchParam = document.querySelector('[data-session-search-param]');
+        const filterForm = document.querySelector('.directory-filter');
+        if (searchInput && searchParam) {
+          const url = new URL(window.location.href);
+          const initialQuery = url.searchParams.has('q') ? url.searchParams.get('q') : '';
+          let userEditedSearch = false;
+          const applyUrlQuery = () => {
+            if (userEditedSearch) return;
+            searchInput.value = initialQuery;
+            searchParam.value = initialQuery;
+          };
+          const syncSearchQuery = () => {
+            userEditedSearch = true;
+            searchParam.value = searchInput.value.trim();
+          };
+          applyUrlQuery();
+          window.requestAnimationFrame(applyUrlQuery);
+          window.setTimeout(applyUrlQuery, 50);
+          window.setTimeout(applyUrlQuery, 250);
+          window.setTimeout(applyUrlQuery, 1000);
+          window.addEventListener('pageshow', () => {
+            userEditedSearch = false;
+            applyUrlQuery();
+          });
+          searchInput.addEventListener('input', syncSearchQuery);
+          if (filterForm) {
+            filterForm.addEventListener('submit', syncSearchQuery);
+          }
+        }
+
         const flash = document.querySelector('[data-auto-dismiss="true"]');
         if (!flash) return;
         const url = new URL(window.location.href);
