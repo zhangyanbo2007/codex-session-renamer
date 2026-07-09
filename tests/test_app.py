@@ -548,6 +548,7 @@ class AppTest(unittest.TestCase):
 
         self.assertIn('id="session-search" name="session_search_display" value=""', text)
         self.assertIn('autocomplete="new-password"', text)
+        self.assertIn('readonly data-session-search-input', text)
         self.assertIn('id="search-query-param" name="q" value=""', text)
         self.assertIn("url.searchParams.has('q')", text)
         self.assertIn("searchInput.value = initialQuery", text)

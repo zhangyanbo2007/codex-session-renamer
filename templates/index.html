@@ -36,7 +36,7 @@
               {% endfor %}
             </select>
             <label for="session-search">搜索</label>
-            <input id="session-search" name="session_search_display" value="{{ search_query }}" placeholder="标题或内容" autocomplete="new-password" autocapitalize="none" spellcheck="false" data-session-search-input>
+            <input id="session-search" name="session_search_display" value="{{ search_query }}" placeholder="标题或内容" autocomplete="new-password" autocapitalize="none" spellcheck="false" readonly data-session-search-input>
             <input type="hidden" id="search-query-param" name="q" value="{{ search_query }}" data-session-search-param>
             <button class="secondary" type="submit">搜索</button>
           </form>
@@ -160,6 +160,7 @@
             if (userEditedSearch) return;
             searchInput.value = initialQuery;
             searchParam.value = initialQuery;
+            searchInput.readOnly = true;
           };
           const syncSearchQuery = () => {
             userEditedSearch = true;
@@ -173,6 +174,12 @@
           window.addEventListener('pageshow', () => {
             userEditedSearch = false;
             applyUrlQuery();
+          });
+          searchInput.addEventListener('focus', () => {
+            searchInput.readOnly = false;
+          });
+          searchInput.addEventListener('pointerdown', () => {
+            searchInput.readOnly = false;
           });
           searchInput.addEventListener('input', syncSearchQuery);
           if (filterForm) {
