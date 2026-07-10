@@ -2,12 +2,13 @@
 
 ## Goal
 
-Prepare `session-renamer` for publication as a self-contained GitHub repository without exposing personal infrastructure details or changing its existing session-management behavior.
+Prepare the project for publication as a self-contained GitHub repository named `codex-session-renamer`, without exposing personal infrastructure details or changing its existing session-management behavior.
 
 ## Scope
 
 The release-hardening work will:
 
+- rename the repository directory and public-facing project references from `session-renamer` to `codex-session-renamer`;
 - replace the private FRP deployment script with a reusable environment-driven example;
 - remove personal usernames, absolute paths, public IP addresses, and private infrastructure layout from the current tree;
 - separate public examples from ignored local configuration;
@@ -16,6 +17,8 @@ The release-hardening work will:
 - scan both the final working tree and existing Git history before publication.
 
 The work will not redesign session listing, title generation, renaming, deletion, caching, or the web interface.
+
+The Python import package will remain `session_renamer`. Renaming the import namespace would add compatibility churn without improving the public repository name.
 
 ## Public Configuration Boundary
 
