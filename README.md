@@ -77,6 +77,40 @@ http://127.0.0.1:8891/?token=<SESSION_RENAMER_TOKEN>
 
 The launcher uses `PYTHON` when supplied, then `.venv/bin/python`, then `python3` from `PATH`.
 
+## Workflow walkthrough
+
+> All sessions, directories, titles, messages, IDs, and timestamps in the screenshots below are fictional demonstration data. No real Codex conversation data is shown.
+
+### 1. Browse, filter, and search sessions
+
+Choose a working directory or search by title and conversation content. The list keeps rename, recommendation, and deletion controls available without opening the detail page.
+
+![Filter sessions by directory](./docs/images/workflow-01-session-list.png)
+
+### 2. Generate title recommendations
+
+Click **一键标题推荐** to refresh recommendations for the current filtered result. This action only fills recommendation and rename fields; it does not rename sessions.
+
+![Generate recommendations for the current session list](./docs/images/workflow-02-title-recommendations.png)
+
+### 3. Recommend a title for one session
+
+Use search to isolate a session, then click **单会话标题推荐**. The generated three-level title is placed in that session's rename input for review and editing.
+
+![Generate a recommendation for one session](./docs/images/workflow-03-single-session-recommendation.png)
+
+### 4. Apply a reviewed title
+
+Edit the prefilled value when needed and click **单会话改名**. A temporary success message confirms that the rename was applied.
+
+![Confirmation after renaming one session](./docs/images/workflow-04-renamed-status.png)
+
+### 5. Review the conversation before cleanup
+
+Open a session title to inspect its messages, refresh the recommendation, save a new title, or delete the session after review.
+
+![Session detail and conversation review](./docs/images/workflow-05-session-detail.png)
+
 ## Usage
 
 Configure Qwen before requesting title recommendations:
