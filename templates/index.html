@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Codex会话管理工具</title>
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <main class="page">
+      <header class="topbar">
+        <div class="topbar-title">
+          <h1>Codex会话管理工具</h1>
+          <div class="topbar-stats">
+            <span class="app-version">v{{ app_version }}</span>
+          {% if selected_directory %}
+            <span>{{ sessions|length }} / {{ total_count }} 条记录</span>
+          {% else %}
+            <span>{{ total_count }} 条记录</span>
+          {% endif %}
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <form class="directory-filter" method="get" action="/">
+            <input type="hidden" name="token" value="{{ token }}">
+            {% if selected_needs_rename %}
+            <input type="hidden" name="needs_rename" value="1">
+            {% endif %}
+            {% if selected_changed %}
+            <input type="hidden" name="changed" value="1">
+            {% endif %}
+            <label for="directory">目录</label>
+            <select id="directory" name="directory" onchange="this.form.submit()">
+              <option value="" {% if not selected_directory %}selected{% endif %}>全部目录</option>
+              {% for option in directory_options %}
+              <option value="{{ option.directory }}" {% if option.directory == selected_directory %}selected{% endif %}>{{ option.directory }}（{{ option.count }}）</option>
+              {% endfor %}
+            </select>
+            <label for="session-search">搜索</label>
+            <input id="session-search" name="session_search_display" value="{{ search_query }}" placeholder="标题或内容" autocomplete="new-password" autocapitalize="none" spellcheck="false" readonly data-session-search-input>
+            <input type="hidden" id="search-query-param" name="q" value="{{ search_query }}" data-session-search-param>
+            <button class="secondary" type="submit">搜索</button>
+          </form>
+          <div class="bulk-actions">
+            <form method="get" action="/">
+              <input type="hidden" name="token" value="{{ token }}">
+              {% if selected_directory %}
+              <input type="hidden" name="directory" value="{{ selected_directory }}">
+              {% endif %}
+              {% if search_query %}
+              <input type="hidden" name="q" value="{{ search_query }}">
+              {% endif %}
+              {% if not selected_needs_rename %}
+              <input type="hidden" name="needs_rename" value="1">
+              {% endif %}
+              {% if selected_changed %}
+              <input type="hidden" name="changed" value="1">
+              {% endif %}
+              <button class="filter-toggle{% if selected_needs_rename %} active{% endif %}" type="submit">
+                {% if selected_needs_rename %}释放未改名{% else %}只看未改名{% endif %}
+              </button>
+            </form>
+            <form method="get" action="/">
+              <input type="hidden" name="token" value="{{ token }}">
+              {% if selected_directory %}
+              <input type="hidden" name="directory" value="{{ selected_directory }}">
+              {% endif %}
+              {% if search_query %}
+              <input type="hidden" name="q" value="{{ search_query }}">
+              {% endif %}
+              {% if selected_needs_rename %}
+              <input type="hidden" name="needs_rename" value="1">
+              {% endif %}
+              {% if not selected_changed %}
+              <input type="hidden" name="changed" value="1">
+              {% endif %}
+              <button class="filter-toggle{% if selected_changed %} active{% endif %}" type="submit">
+                {% if selected_changed %}释放会话变化{% else %}只看会话变化{% endif %}
+              </button>
+            </form>
+            <form method="post" action="/recommend-all?{{ list_query }}">
+              <button class="secondary" type="submit">一键标题推荐</button>
+            </form>
+            <form method="post" action="/auto-rename-all?{{ list_query }}">
+              <button type="submit">一键全部改名</button>
+            </form>
+          </div>
+        </div>
+      </header>
+
+      {% if status_message %}
+      <div class="flash success" data-auto-dismiss="true">{{ status_message }}</div>
+      {% endif %}
+
+      <section class="session-list">
+        {% for group in groups %}
+        <section class="directory-group">
+          <div class="directory-head">
+            <h2>{{ group.directory }}</h2>
+            <span>{{ group.count }} 条</span>
+          </div>
+          <div class="directory-sessions">
+            {% for row in group.rows %}
+            {% set session = row.session %}
+            <article class="session-row{% if row.needs_model_rename %} needs-model-rename{% endif %}">
+              <div class="session-main">
+                <div class="session-title-row">
+                  <a class="session-title" href="/sessions/{{ session.id }}?token={{ token }}">{{ row.display_thread_name }}</a>
+                  {% if row.needs_model_rename %}
+                  <span class="status-badge needs-rename">未改名</span>
+                  {% endif %}
+                  {% if row.conversation_changed %}
+                  <span class="status-badge changed">会话变化</span>
+                  {% endif %}
+                </div>
+                <div class="meta">
+                  <span>{{ session.updated_at }}</span>
+                  <span>{{ session.id }}</span>
+                  {% if session.log_path %}
+                  <span>{{ session.message_count }} 条消息</span>
+                  {% else %}
+                  <span>未找到日志</span>
+                  {% endif %}
+                </div>
+                {% if session.preview %}
+                <p class="preview">{{ session.preview }}</p>
+                {% endif %}
+                <div class="recommendation">
+                  <span>推荐标题</span>
+                  <strong>{{ row.suggested_title }}</strong>
+                </div>
+                <div class="row-actions">
+                  <form class="single-recommend" method="post" action="/sessions/{{ session.id }}/recommend?{{ list_query }}&next=list">
+                    <button class="secondary" type="submit">单会话标题推荐</button>
+                  </form>
+                  <form class="inline-rename" method="post" action="/sessions/{{ session.id }}/rename?{{ list_query }}&next=list">
+                    <input name="thread_name" value="{{ row.rename_value }}" maxlength="120" aria-label="新会话名">
+                    <button class="secondary" type="submit">单会话改名</button>
+                  </form>
+                  <form class="delete-form inline-delete" method="post" action="/sessions/{{ session.id }}/delete?{{ list_query }}" onsubmit="return confirm('确认删除这个会话？日志会移入 trash，索引会备份。')">
+                    <button class="danger" type="submit">删除会话</button>
+                  </form>
+                </div>
+              </div>
+            </article>
+            {% endfor %}
+          </div>
+        </section>
+        {% else %}
+        <p class="empty">没有可展示的会话记录。</p>
+        {% endfor %}
+      </section>
+    </main>
+    <script>
+      (() => {
+        const searchInput = document.querySelector('[data-session-search-input]');
+        const searchParam = document.querySelector('[data-session-search-param]');
+        const filterForm = document.querySelector('.directory-filter');
+        if (searchInput && searchParam) {
+          const url = new URL(window.location.href);
+          const initialQuery = url.searchParams.has('q') ? url.searchParams.get('q') : '';
+          let userEditedSearch = false;
+          const applyUrlQuery = () => {
+            if (userEditedSearch) return;
+            searchInput.value = initialQuery;
+            searchParam.value = initialQuery;
+            searchInput.readOnly = true;
+          };
+          const syncSearchQuery = () => {
+            userEditedSearch = true;
+            searchParam.value = searchInput.value.trim();
+          };
+          applyUrlQuery();
+          window.requestAnimationFrame(applyUrlQuery);
+          window.setTimeout(applyUrlQuery, 50);
+          window.setTimeout(applyUrlQuery, 250);
+          window.setTimeout(applyUrlQuery, 1000);
+          window.addEventListener('pageshow', () => {
+            userEditedSearch = false;
+            applyUrlQuery();
+          });
+          searchInput.addEventListener('focus', () => {
+            searchInput.readOnly = false;
+          });
+          searchInput.addEventListener('pointerdown', () => {
+            searchInput.readOnly = false;
+          });
+          searchInput.addEventListener('input', syncSearchQuery);
+          if (filterForm) {
+            filterForm.addEventListener('submit', syncSearchQuery);
+          }
+        }
+
+        const flash = document.querySelector('[data-auto-dismiss="true"]');
+        if (!flash) return;
+        const url = new URL(window.location.href);
+        if (url.searchParams.has('status')) {
+          url.searchParams.delete('status');
+          const nextUrl = url.pathname + (url.search ? url.search : '') + url.hash;
+          window.history.replaceState(null, '', nextUrl);
+        }
+        window.setTimeout(() => {
+          flash.hidden = true;
+        }, 3200);
+      })();
+    </script>
+  </body>
+</html>
