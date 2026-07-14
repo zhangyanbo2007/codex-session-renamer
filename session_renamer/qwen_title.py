@@ -6,15 +6,18 @@ import re
 import socket
 import urllib.error
 import urllib.request
-from pathlib import Path
 from typing import Protocol
 
 from .store import SessionMessage
-from .title_suggester import format_combined_title, suggest_title, summary_title_context
+from .title_suggester import (
+    format_combined_title,
+    overall_title_context,
+    recent_title_context,
+)
 
 
 DASHSCOPE_CHAT_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-DEFAULT_MODEL = "qwen-turbo"
+DEFAULT_MODEL = "qwen3.5-flash"
 
 
 class TitleGenerator(Protocol):
@@ -22,9 +25,9 @@ class TitleGenerator(Protocol):
         ...
 
 
-class LocalTitleGenerator:
+class ExistingTitleGenerator:
     def suggest(self, messages: list[SessionMessage], fallback: str) -> str:
-        return suggest_title(messages, fallback=fallback)
+        return fallback
 
 
 class QwenTitleGenerator:
@@ -42,34 +45,71 @@ class QwenTitleGenerator:
         self.base_url = base_url
         self.timeout = timeout
         self.opener = opener or _default_opener()
-        self.local = LocalTitleGenerator()
 
     def suggest(self, messages: list[SessionMessage], fallback: str) -> str:
-        context = summary_title_context(messages)
-        if not context:
-            return fallback
+        overall_context = overall_title_context(messages)
+        if not overall_context:
+            return "暂无推荐"
+        raw_overall = self._complete(
+            (
+                "你是 Codex 会话整体任务标题生成器。只输出一个自然的任务名称。"
+                "标题必须直接标识核心任务，采用“具体对象+工作动作或目标+任务”，并以“任务”结尾。"
+                "“任务”前必须有明确的项目、产品、人物、工具或成果名称，严禁只输出“任务”。"
+                "先识别任务对象、目标成果和主要动作，禁止复制用户原句、疑问句、路径或临时进度。"
+                "把故障现象改写为排查、修复或分析任务，把需求讨论改写为设计或实现任务。"
+                "例如：黄子晨动画HTML制作任务、跨境视频需求分析任务、Codex插件故障排查任务。"
+                "对于只有产品名或工具名的稀疏会话，也要结合助手回复推断宽泛但具体的咨询或使用任务，"
+                "例如用户只说“codex”时生成“Codex使用咨询任务”，不能输出“暂无推荐”。"
+                "只有纯问候、纯测试或完全无对象内容时输出“暂无推荐”。"
+            ),
+            (
+                f"当前标题（仅作为任务线索，不要照抄）：{fallback}\n\n"
+                f"根据完整会话线索生成整体任务标题：\n\n{overall_context}"
+            ),
+        )
+        overall_title = _parse_component(raw_overall)
+        if _is_generic_title(overall_title):
+            overall_title = _parse_component(fallback)
+        if _is_generic_title(overall_title):
+            return "暂无推荐"
 
+        recent_context = recent_title_context(messages)
+        if not recent_context:
+            return format_combined_title(overall_title, overall_title)
+        raw_recent = self._complete(
+            (
+                "你是 Codex 会话最近状态标题生成器。只输出一个简短状态标题，不要输出整体标题。"
+                "必须围绕给定的整体任务，概括最近2轮正在处理的具体工作、结果或阻塞。"
+                "不能照抄“进度如何、现在呢、好了吗”等追问，也不要输出路径、解释或标点结尾。"
+            ),
+            f"整体任务：{overall_title}\n\n{recent_context}",
+        )
+        recent_title = _parse_component(raw_recent)
+        if _is_generic_title(recent_title):
+            recent_title = overall_title
+        rewritten_recent = self._complete(
+            (
+                "你是 Codex 会话状态标题审校器。只输出一个简短状态标题。"
+                "根据整体任务审校模型草稿，只保留抽象工作状态、结果或阻塞；"
+                "删除文件路径、命令、解释、寒暄和句末标点，不要输出整体标题。"
+                "不得增加对话中不存在的事实。"
+            ),
+            f"整体任务：{overall_title}\n最近状态草稿：{recent_title}",
+        )
+        recent_title = _parse_component(rewritten_recent) or recent_title
+        if _is_generic_title(recent_title):
+            recent_title = overall_title
+        return format_combined_title(overall_title, recent_title)
+
+    def _complete(self, system_prompt: str, user_prompt: str) -> str:
         payload = {
             "model": self.model,
+            "enable_thinking": False,
             "temperature": 0.2,
             "max_tokens": 96,
             "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是 Codex 会话标题生成器。只输出一行组合标题，格式必须是："
-                        "<总摘要标题>｜<最近2轮摘要标题>。"
-                        "只能包含一个分隔符“｜”。两个标题都要短，不要输出路径、日期、编号、引号、解释、标点结尾。"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "根据以下清洗后的会话线索生成“总摘要标题+最近2轮摘要标题”。"
-                        "若内容只是路径、环境上下文或无明确任务，输出“暂无推荐”。\n\n"
-                        f"{context}"
-                    ),
-                },
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
         }
         request = urllib.request.Request(
@@ -86,18 +126,14 @@ class QwenTitleGenerator:
                 data = json.loads(response.read().decode("utf-8"))
             raw_title = data["choices"][0]["message"]["content"]
         except (KeyError, json.JSONDecodeError, OSError, urllib.error.URLError):
-            return self.local.suggest(messages, fallback=fallback)
-
-        title = normalize_model_title(str(raw_title))
-        if title:
-            return title
-        return self.local.suggest(messages, fallback=fallback)
+            return ""
+        return str(raw_title)
 
 
 def create_title_generator() -> TitleGenerator:
     provider = os.environ.get("SESSION_RENAMER_TITLE_PROVIDER", "qwen").strip().lower()
     if provider == "local":
-        return LocalTitleGenerator()
+        return ExistingTitleGenerator()
 
     api_key = _env_value(
         "SESSION_RENAMER_DASHSCOPE_API_KEY",
@@ -105,7 +141,7 @@ def create_title_generator() -> TitleGenerator:
         "DASH_SCOPE_API_KEY",
     )
     if not api_key:
-        return LocalTitleGenerator()
+        return ExistingTitleGenerator()
     return QwenTitleGenerator(
         api_key=api_key,
         model=os.environ.get("SESSION_RENAMER_QWEN_MODEL", DEFAULT_MODEL),
@@ -114,67 +150,33 @@ def create_title_generator() -> TitleGenerator:
     )
 
 
-def normalize_model_title(raw_title: str) -> str:
-    title = raw_title.strip().strip("\"'“”‘’` ")
+def _parse_component(raw_title: str) -> str:
+    title = str(raw_title or "").strip().strip("\"'“”‘’` ")
     title = re.sub(r"^(标题|推荐标题|会话名|名称)\s*[:：]\s*", "", title)
-    title = title.replace("总摘要标题", "总")
-    title = title.replace("总标题", "总")
-    title = title.replace("最近两轮摘要标题", "近2轮")
-    title = title.replace("最近2轮摘要标题", "近2轮")
-    title = title.replace("近两轮摘要标题", "近2轮")
-    title = title.replace("近两轮", "近2轮")
-    title = re.sub(r"[\r\n]+", "｜", title)
+    title = re.sub(r"[\r\n]+", " ", title)
     title = re.sub(r"\s+", " ", title)
-    title = title.strip(" ，。,.：:；;\"'“”‘’`")
-    if not title:
-        return ""
+    title = title.split("｜", 1)[0]
+    title = title.strip(" ，。,.：:；;\"'“”‘’`|｜")
     if title in {"未命名", "未命名会话", "暂无推荐"}:
         return ""
-    if _looks_like_path(title):
-        return ""
-    title = _strip_summary_labels(title)
-    if "｜" not in title:
-        title = format_combined_title(title, title)
-    else:
-        overall, recent = title.split("｜", 1)
-        title = format_combined_title(overall, recent)
-    if len(title) > 120:
-        title = title[:120].rstrip(" ，。,.：:；;|｜")
     return title
 
 
-def _strip_summary_labels(title: str) -> str:
-    title = re.sub(r"^总[:：]\s*", "", title)
-    title = re.sub(r"\s*[|｜]\s*近2轮[:：]\s*", "｜", title)
-    title = re.sub(r"\s+近2轮[:：]\s*", "｜", title)
-    title = re.sub(r"^近2轮[:：]\s*", "", title)
-    title = re.sub(r"\s*[|｜]\s*", "｜", title)
-    return title.strip(" ，。,.：:；;|｜")
-
-
-def _looks_like_path(value: str) -> bool:
-    return bool(
-        re.search(r"(^|\s)/home/[^ ]+", value)
-        or re.search(r"(^|\s)/(tmp|var|usr|etc|opt|root|data|mnt)/[^ ]+", value)
-        or re.search(r"[A-Za-z]:\\", value)
-    )
+def _is_generic_title(title: str) -> bool:
+    normalized = re.sub(r"\s+", "", str(title or "")).lower()
+    if not normalized:
+        return True
+    if normalized in {"hello", "hi", "hey", "test", "demo", "ok", "okay", "你好", "您好", "测试"}:
+        return True
+    if normalized.isascii() and normalized.isalpha() and len(normalized) <= 2:
+        return True
+    return False
 
 
 def _env_value(*names: str) -> str:
     for name in names:
         value = os.environ.get(name)
         if value:
-            return value.strip().strip("\"'")
-
-    env_path = Path(__file__).resolve().parents[3] / ".env"
-    if not env_path.exists():
-        return ""
-    for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        if key.strip() in names:
             return value.strip().strip("\"'")
     return ""
 

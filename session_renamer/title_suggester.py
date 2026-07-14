@@ -15,14 +15,25 @@ NOISE_MARKERS = (
     "permission_profile",
 )
 
+PURE_GREETING_MARKERS = {
+    "hello",
+    "hi",
+    "hey",
+    "hola",
+    "test",
+    "demo",
+    "ok",
+    "okay",
+    "thanks",
+    "thankyou",
+    "thank you",
+    "你好",
+    "您好",
+    "嗨",
+    "测试",
+}
 
-def suggest_title(messages: Iterable[SessionMessage], fallback: str = "未命名会话") -> str:
-    candidates = meaningful_user_candidates(messages)
-    if candidates:
-        overall = _title_for_candidate(candidates[0])
-        recent = "；".join(_title_for_candidate(candidate) for candidate in candidates[-2:])
-        return format_combined_title(overall, recent)
-    return fallback
+INPUT_TOKEN_RESERVE = 1_000
 
 
 def meaningful_user_candidates(messages: Iterable[SessionMessage]) -> list[str]:
@@ -36,35 +47,46 @@ def meaningful_user_candidates(messages: Iterable[SessionMessage]) -> list[str]:
     return candidates
 
 
-def title_context(messages: Iterable[SessionMessage], max_chars: int = 1600) -> str:
-    chunks = meaningful_user_candidates(messages)[:6]
-    context = "\n".join(f"- {chunk}" for chunk in chunks)
-    if len(context) <= max_chars:
-        return context
-    return context[:max_chars].rsplit("\n", 1)[0].strip()
-
-
-def summary_title_context(messages: Iterable[SessionMessage], max_chars: int = 3200) -> str:
+def summary_title_context(
+    messages: Iterable[SessionMessage], max_tokens: int = 100_000
+) -> str:
     message_list = list(messages)
-    overall_chunks = meaningful_user_candidates(message_list)[:8]
+    overall_section = overall_title_context(message_list, max_tokens=max_tokens)
+    recent_section = recent_title_context(message_list)
+    return "\n\n".join(section for section in (overall_section, recent_section) if section)
+
+
+def overall_title_context(
+    messages: Iterable[SessionMessage], max_tokens: int = 100_000
+) -> str:
+    overall_chunks = meaningful_user_candidates(messages)
+    budget = max(0, max_tokens - INPUT_TOKEN_RESERVE)
+    overall_prefix = "总任务线索：\n"
+    overall_lines = []
+    used = len(overall_prefix)
+    for chunk in overall_chunks:
+        line = f"- {chunk}"
+        separator = 1 if overall_lines else 0
+        if used + separator + len(line) > budget:
+            available = budget - used - separator
+            if available > 2:
+                overall_lines.append(line[:available])
+            break
+        overall_lines.append(line)
+        used += separator + len(line)
+    return overall_prefix + "\n".join(overall_lines) if overall_lines else ""
+
+
+def recent_title_context(messages: Iterable[SessionMessage]) -> str:
     recent_chunks = []
-    for index, round_messages in enumerate(_recent_rounds(message_list), start=1):
+    for index, round_messages in enumerate(_recent_rounds(list(messages)), start=1):
         user_text = round_messages.get("user")
         assistant_text = round_messages.get("assistant")
         if user_text:
-            recent_chunks.append(f"第{index}轮用户：{_truncate_context(user_text)}")
+            recent_chunks.append(f"第{index}轮用户：{user_text}")
         if assistant_text:
-            recent_chunks.append(f"第{index}轮助手：{_truncate_context(assistant_text)}")
-
-    sections = []
-    if overall_chunks:
-        sections.append("总任务线索：\n" + "\n".join(f"- {_truncate_context(chunk)}" for chunk in overall_chunks))
-    if recent_chunks:
-        sections.append("最近2轮：\n" + "\n".join(recent_chunks))
-    context = "\n\n".join(sections)
-    if len(context) <= max_chars:
-        return context
-    return context[:max_chars].rsplit("\n", 1)[0].strip()
+            recent_chunks.append(f"第{index}轮助手：{assistant_text}")
+    return "最近2轮：\n" + "\n".join(recent_chunks) if recent_chunks else ""
 
 
 def format_combined_title(overall: str, recent: str) -> str:
@@ -77,6 +99,11 @@ def _clean_candidate(text: str) -> str:
     if any(marker in text for marker in NOISE_MARKERS):
         return ""
     cleaned = re.sub(r"```.*?```", " ", text, flags=re.S)
+    cleaned = re.sub(
+        r"(?<!\S)/(?:home|tmp|var|usr|etc|opt|root|data|mnt)/[^\s，。,]+",
+        _project_name_from_path,
+        cleaned,
+    )
     cleaned = re.sub(r"<codex_internal_context.*?</codex_internal_context>", " ", cleaned, flags=re.S)
     cleaned = re.sub(r"<environment_context>.*?</environment_context>", " ", cleaned, flags=re.S)
     cleaned = re.sub(r"<[^>]{1,80}>", " ", cleaned)
@@ -84,6 +111,11 @@ def _clean_candidate(text: str) -> str:
     cleaned = cleaned.replace("任务名：", " ")
     cleaned = cleaned.replace("任务名:", " ")
     cleaned = re.sub(r"^Rename this task to:\s*", "", cleaned, flags=re.I)
+    cleaned = re.sub(
+        r"(?:帮忙|请)?看看需求[，。,、\s]*(?:怎么实现)?[，。,、\s]*(?:给个方案)?",
+        " ",
+        cleaned,
+    )
     lines = [line.strip(" \t\r\n，。,.：:；;()（）[]【】") for line in cleaned.splitlines()]
     lines = [line for line in lines if line and not _is_noise_line(line)]
     if not lines:
@@ -92,31 +124,15 @@ def _clean_candidate(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     if _is_noise_line(cleaned):
         return ""
+    if _is_pure_greeting(cleaned):
+        return ""
     return cleaned
 
 
-def _keyword_title(candidate: str) -> str | None:
-    if "会话" in candidate and ("改名" in candidate or "重命名" in candidate):
-        return "Codex会话管理工具"
-    if "会话" in candidate and ("管理" in candidate or "删除" in candidate):
-        return "Codex会话管理工具"
-    if "FRP" in candidate.upper() and ("访问" in candidate or "暴露" in candidate):
-        return "FRP 访问配置"
-    if "测试" in candidate and len(candidate) <= 12:
-        return candidate
-    return None
-
-
-def _title_for_candidate(candidate: str) -> str:
-    mapped = _keyword_title(candidate)
-    return mapped or _truncate_title(candidate)
-
-
-def _truncate_title(candidate: str) -> str:
-    candidate = candidate.strip(" ，。,.：:；;")
-    if len(candidate) <= 28:
-        return candidate
-    return candidate[:28].rstrip(" ，。,.：:；;")
+def _project_name_from_path(match: re.Match[str]) -> str:
+    path = match.group(0).rstrip("/")
+    basename = path.rsplit("/", 1)[-1]
+    return basename if "." not in basename else " "
 
 
 def _truncate_component(candidate: str, limit: int) -> str:
@@ -125,13 +141,6 @@ def _truncate_component(candidate: str, limit: int) -> str:
     if len(candidate) <= limit:
         return candidate
     return candidate[:limit].rstrip(" ，。,.：:；;|｜")
-
-
-def _truncate_context(candidate: str, limit: int = 260) -> str:
-    candidate = " ".join(candidate.split())
-    if len(candidate) <= limit:
-        return candidate
-    return candidate[:limit].rstrip(" ，。,.：:；;") + "..."
 
 
 def _recent_rounds(messages: list[SessionMessage], limit: int = 2) -> list[dict[str, str]]:
@@ -176,5 +185,16 @@ def _is_noise_line(line: str) -> bool:
     if "AGENTS.md" in stripped or "environment_context" in stripped:
         return True
     if len(stripped) < 4 and "/" in stripped:
+        return True
+    return False
+
+
+def _is_pure_greeting(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", str(text or "")).lower()
+    if not normalized:
+        return True
+    if normalized in PURE_GREETING_MARKERS:
+        return True
+    if normalized.isascii() and normalized.isalpha() and len(normalized) <= 2:
         return True
     return False

@@ -4,10 +4,25 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from session_renamer.store import SessionStore
+
+
+class RecordingThreadRenamer:
+    def __init__(self, state_path):
+        self.state_path = state_path
+        self.calls = []
+
+    def set_names(self, titles_by_id):
+        self.calls.append(dict(titles_by_id))
+        with sqlite3.connect(self.state_path) as conn:
+            conn.executemany(
+                "update threads set title = ? where id = ?",
+                [(title, session_id) for session_id, title in titles_by_id.items()],
+            )
 
 
 class SessionStoreTest(unittest.TestCase):
@@ -68,6 +83,20 @@ class SessionStoreTest(unittest.TestCase):
                 [row if len(row) == 10 else (*row, "") for row in rows],
             )
         return state_path
+
+    def test_default_paths_follow_codex_home_environment(self):
+        configured_home = self.root / "custom-codex-home"
+        configured_home.mkdir()
+
+        with patch.dict("os.environ", {"CODEX_HOME": str(configured_home)}):
+            store = SessionStore(
+                thread_renamer=RecordingThreadRenamer(
+                    configured_home / "state_5.sqlite"
+                )
+            )
+
+        self.assertEqual(store.codex_home, configured_home)
+        self.assertEqual(store.index_path, configured_home / "session_index.jsonl")
 
     def test_list_sessions_loads_index_and_attaches_log_path(self):
         self.write_index(
@@ -247,11 +276,18 @@ class SessionStoreTest(unittest.TestCase):
             ]
         )
 
-        backup_path = SessionStore(self.index_path, self.codex_home).rename_session(
-            "sqlite-only", "新 SQLite 标题"
-        )
+        renamer = RecordingThreadRenamer(self.codex_home / "state_5.sqlite")
+        backup_path = SessionStore(
+            self.index_path,
+            self.codex_home,
+            thread_renamer=renamer,
+        ).rename_session("sqlite-only", "新 SQLite 标题")
 
         self.assertTrue(backup_path.exists())
+        self.assertEqual(
+            renamer.calls,
+            [{"sqlite-only": "新 SQLite 标题"}],
+        )
         with sqlite3.connect(self.codex_home / "state_5.sqlite") as conn:
             self.assertEqual(
                 conn.execute(
@@ -259,6 +295,37 @@ class SessionStoreTest(unittest.TestCase):
                 ).fetchone()[0],
                 "新 SQLite 标题",
             )
+
+    def test_sqlite_rename_invalidates_in_process_session_list(self):
+        self.write_index([])
+        log_path = self.write_log("sqlite-cached", [])
+        self.write_state_threads(
+            [
+                (
+                    "sqlite-cached",
+                    str(log_path),
+                    100,
+                    200,
+                    "旧 SQLite 标题",
+                    0,
+                    "user",
+                    "",
+                    200000,
+                    "/work/demo",
+                )
+            ]
+        )
+        renamer = RecordingThreadRenamer(self.codex_home / "state_5.sqlite")
+        store = SessionStore(
+            self.index_path,
+            self.codex_home,
+            thread_renamer=renamer,
+        )
+        self.assertEqual(store.list_sessions()[0].thread_name, "旧 SQLite 标题")
+
+        store.rename_session("sqlite-cached", "新 SQLite 标题")
+
+        self.assertEqual(store.list_sessions()[0].thread_name, "新 SQLite 标题")
 
     def test_delete_session_removes_sqlite_only_thread_and_moves_log_to_trash(self):
         self.write_index([])

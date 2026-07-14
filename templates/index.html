@@ -12,6 +12,7 @@
         <div class="topbar-title">
           <h1>Codex会话管理工具</h1>
           <div class="topbar-stats">
+            <span class="app-version">v{{ app_version }}</span>
           {% if selected_directory %}
             <span>{{ sessions|length }} / {{ total_count }} 条记录</span>
           {% else %}
@@ -129,6 +130,9 @@
                   <strong>{{ row.suggested_title }}</strong>
                 </div>
                 <div class="row-actions">
+                  <form class="single-recommend" method="post" action="/sessions/{{ session.id }}/recommend?{{ list_query }}&next=list">
+                    <button class="secondary" type="submit">单会话标题推荐</button>
+                  </form>
                   <form class="inline-rename" method="post" action="/sessions/{{ session.id }}/rename?{{ list_query }}&next=list">
                     <input name="thread_name" value="{{ row.rename_value }}" maxlength="120" aria-label="新会话名">
                     <button class="secondary" type="submit">单会话改名</button>

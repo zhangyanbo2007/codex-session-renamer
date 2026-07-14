@@ -1,12 +1,15 @@
 import io
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from session_renamer.qwen_title import QwenTitleGenerator, normalize_model_title
+from session_renamer import qwen_title
+from session_renamer.qwen_title import ExistingTitleGenerator, QwenTitleGenerator
 from session_renamer.store import SessionMessage
 
 
@@ -26,26 +29,49 @@ class FakeResponse:
 
 class FakeOpener:
     def __init__(self, payload):
-        self.payload = payload
+        self.payloads = payload if isinstance(payload, list) else [payload]
         self.requests = []
 
     def open(self, request, timeout):
         self.requests.append((request, timeout))
-        return FakeResponse(self.payload)
+        index = min(len(self.requests) - 1, len(self.payloads) - 1)
+        return FakeResponse(self.payloads[index])
 
 
 class QwenTitleTest(unittest.TestCase):
+    def test_api_key_is_not_loaded_from_parent_project_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package_file = Path(tmp) / "a" / "b" / "c" / "qwen_title.py"
+            package_file.parent.mkdir(parents=True)
+            (Path(tmp) / ".env").write_text("DASHSCOPE_API_KEY=private-key\n")
+            with (
+                patch.object(qwen_title, "__file__", str(package_file)),
+                patch.dict("os.environ", {}, clear=True),
+            ):
+                self.assertEqual(qwen_title._env_value("DASHSCOPE_API_KEY"), "")
+
     def test_qwen_generator_returns_model_title(self):
         opener = FakeOpener(
-            {
-                "choices": [
-                    {
-                        "message": {
-                            "content": "整理浏览器书签｜按项目分组书签；确认分类方案"
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "整理浏览器书签任务"
+                            }
                         }
-                    }
-                ]
-            }
+                    ]
+                },
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "按项目分组书签；确认分类方案"
+                            }
+                        }
+                    ]
+                },
+            ]
         )
         generator = QwenTitleGenerator(api_key="test-key", opener=opener)
 
@@ -70,28 +96,103 @@ class QwenTitleTest(unittest.TestCase):
             fallback="旧标题",
         )
 
-        self.assertEqual(title, "整理浏览器书签｜按项目分组书签；确认分类方案")
-        body = json.loads(opener.requests[0][0].data.decode("utf-8"))
-        self.assertEqual(body["model"], "qwen-turbo")
-        self.assertIn("最近2轮", body["messages"][1]["content"])
-        self.assertIn("<总摘要标题>｜<最近2轮摘要标题>", body["messages"][0]["content"])
-        self.assertIn("只能包含一个", body["messages"][0]["content"])
-        self.assertNotIn("总：<", body["messages"][0]["content"])
-        self.assertNotIn("近2轮：<", body["messages"][0]["content"])
-        self.assertNotIn("/home/zhangyanbo", body["messages"][1]["content"])
-        self.assertNotIn("系统记录", body["messages"][1]["content"])
+        self.assertEqual(title, "整理浏览器书签任务｜按项目分组书签；确认分类方案")
+        self.assertEqual(len(opener.requests), 3)
+        overall_body = json.loads(opener.requests[0][0].data.decode("utf-8"))
+        recent_body = json.loads(opener.requests[1][0].data.decode("utf-8"))
+        self.assertEqual(overall_body["model"], "qwen3.5-flash")
+        self.assertFalse(overall_body["enable_thinking"])
+        self.assertIn("具体对象+工作动作或目标+任务", overall_body["messages"][0]["content"])
+        self.assertIn("Codex插件故障排查任务", overall_body["messages"][0]["content"])
+        self.assertIn("Codex使用咨询任务", overall_body["messages"][0]["content"])
+        self.assertIn("旧标题", overall_body["messages"][1]["content"])
+        self.assertNotIn("/home/example", overall_body["messages"][1]["content"])
+        self.assertNotIn("系统记录", overall_body["messages"][1]["content"])
+        self.assertIn("整理浏览器书签任务", recent_body["messages"][1]["content"])
+        self.assertIn("最近2轮", recent_body["messages"][1]["content"])
+        self.assertIn("不能照抄", recent_body["messages"][0]["content"])
 
-    def test_model_path_output_is_rejected(self):
-        self.assertEqual(normalize_model_title("/home/zhangyanbo/owner/xiaow"), "")
-
-    def test_placeholder_output_is_rejected(self):
-        self.assertEqual(normalize_model_title("未命名会话"), "")
-
-    def test_extra_model_separators_are_folded_into_recent_title(self):
-        self.assertEqual(
-            normalize_model_title("红鸟挑战营邮件撰写｜范老师理念融入｜邮件润色建议"),
-            "红鸟挑战营邮件撰写｜范老师理念融入；邮件润色建议",
+    def test_model_rewrites_path_bearing_recent_draft(self):
+        opener = FakeOpener(
+            [
+                {"choices": [{"message": {"content": "DevSpace文件共享与权限配置任务"}}]},
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "修改 DevSpace 共享目录为/home/zhangyanbo并重启验证"
+                            }
+                        }
+                    ]
+                },
+                {"choices": [{"message": {"content": "共享目录修改与服务验证"}}]},
+            ]
         )
+        generator = QwenTitleGenerator(api_key="test-key", opener=opener)
+
+        title = generator.suggest(
+            [
+                SessionMessage(role="user", text="系统记录", timestamp=None),
+                SessionMessage(role="user", text="安装 DevSpace", timestamp=None),
+                SessionMessage(
+                    role="user",
+                    text="共享目录改为/home/zhangyanbo并重启验证",
+                    timestamp=None,
+                ),
+            ],
+            fallback="zhangyanbo｜DevSpace 配置与功能分析｜目录修改与服务验证",
+        )
+
+        self.assertEqual(
+            title,
+            "DevSpace文件共享与权限配置任务｜共享目录修改与服务验证",
+        )
+        self.assertEqual(len(opener.requests), 3)
+        rewrite_body = json.loads(opener.requests[2][0].data.decode("utf-8"))
+        self.assertIn("修改 DevSpace 共享目录", rewrite_body["messages"][1]["content"])
+        self.assertIn("只保留抽象工作状态", rewrite_body["messages"][0]["content"])
+
+    def test_no_model_configuration_keeps_existing_title_without_local_rules(self):
+        generator = ExistingTitleGenerator()
+
+        title = generator.suggest(
+            [SessionMessage(role="user", text="会话改名", timestamp=None)],
+            fallback="现有标题",
+        )
+
+        self.assertEqual(title, "现有标题")
+
+    def test_pure_greeting_sessions_do_not_trigger_model_calls(self):
+        opener = FakeOpener({"choices": [{"message": {"content": "hello"}}]})
+        generator = QwenTitleGenerator(api_key="test-key", opener=opener)
+
+        title = generator.suggest(
+            [SessionMessage(role="user", text="hello", timestamp=None)],
+            fallback="hello",
+        )
+
+        self.assertEqual(title, "暂无推荐")
+        self.assertEqual(len(opener.requests), 0)
+
+    def test_generic_model_output_falls_back_to_current_title_lineage(self):
+        opener = FakeOpener({"choices": [{"message": {"content": "hello"}}]})
+        generator = QwenTitleGenerator(api_key="test-key", opener=opener)
+
+        title = generator.suggest(
+            [
+                SessionMessage(
+                    role="user",
+                    text="系统记录：加载环境上下文，不是真实用户任务",
+                    timestamp=None,
+                ),
+                SessionMessage(role="user", text="帮我整理 Chrome 书签", timestamp=None),
+                SessionMessage(role="assistant", text="我会按项目分组。", timestamp=None),
+            ],
+            fallback="旧标题",
+        )
+
+        self.assertEqual(title, "旧标题｜旧标题")
+        self.assertEqual(len(opener.requests), 3)
 
 
 if __name__ == "__main__":

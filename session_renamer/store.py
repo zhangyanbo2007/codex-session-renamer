@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -7,11 +8,17 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
+
+from .codex_app_server import CodexAppServerThreadRenamer
 
 
-DEFAULT_CODEX_HOME = Path("/home/zhangyanbo/.codex")
+DEFAULT_CODEX_HOME = Path.home() / ".codex"
 DEFAULT_INDEX_PATH = DEFAULT_CODEX_HOME / "session_index.jsonl"
+
+
+class ThreadRenamer(Protocol):
+    def set_names(self, titles_by_id: dict[str, str]) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -30,6 +37,7 @@ class SessionSummary:
     cwd: str = ""
     preview: str = ""
     message_count: int = 0
+    content_cache_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -41,6 +49,7 @@ class SessionDetail:
     messages: list[SessionMessage]
     preview: str
     cwd: str = ""
+    content_cache_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -53,21 +62,65 @@ class DeleteResult:
 class SessionStore:
     def __init__(
         self,
-        index_path: Path | str = DEFAULT_INDEX_PATH,
-        codex_home: Path | str = DEFAULT_CODEX_HOME,
+        index_path: Path | str | None = None,
+        codex_home: Path | str | None = None,
+        thread_renamer: ThreadRenamer | None = None,
     ) -> None:
-        self.index_path = Path(index_path)
-        self.codex_home = Path(codex_home)
+        configured_home = codex_home or os.environ.get("CODEX_HOME") or DEFAULT_CODEX_HOME
+        self.codex_home = Path(configured_home).expanduser()
+        configured_index = index_path or os.environ.get("SESSION_RENAMER_INDEX_PATH")
+        self.index_path = (
+            Path(configured_index).expanduser()
+            if configured_index
+            else self.codex_home / "session_index.jsonl"
+        )
+        self.thread_renamer = thread_renamer or CodexAppServerThreadRenamer(
+            self.codex_home
+        )
+        self.metadata_cache_path = self.codex_home / "session-renamer-metadata-cache.json"
+        self._list_cache_mtime: float | None = None
+        self._list_cache_result: list[SessionSummary] | None = None
 
     def list_sessions(self) -> list[SessionSummary]:
+        try:
+            index_mtime = self.index_path.stat().st_mtime
+        except FileNotFoundError:
+            index_mtime = None
+        if self._list_cache_result is not None and index_mtime == self._list_cache_mtime:
+            return self._list_cache_result
         records = self._read_session_records()
         log_paths = self._find_log_paths(records)
+        cache = self._load_metadata_cache()
+        new_cache: dict[str, Any] = {}
         summaries: list[SessionSummary] = []
         for record in records:
             session_id = str(record["id"])
             log_path = record.get("log_path") or log_paths.get(session_id)
-            messages = self._read_messages(log_path) if log_path else []
-            preview = self._make_preview(messages, limit=180) or str(record.get("preview", ""))
+            cached = self._metadata_cache_hit(cache.get(session_id), log_path)
+            if cached:
+                preview = str(cached.get("preview", ""))
+                message_count = int(cached.get("message_count", 0))
+                content_cache_key = str(cached["content_cache_key"])
+            else:
+                messages = self._read_messages(log_path) if log_path else []
+                preview = self._make_preview(messages, limit=180) or str(record.get("preview", ""))
+                message_count = len(messages)
+                detail_preview = self._make_preview(messages, limit=500) or str(
+                    record.get("preview", "")
+                )
+                content_cache_key = conversation_cache_key(
+                    session_id,
+                    messages,
+                    detail_preview,
+                )
+            if log_path:
+                new_cache[session_id] = {
+                    "mtime": log_path.stat().st_mtime,
+                    "size": log_path.stat().st_size,
+                    "preview": preview,
+                    "message_count": message_count,
+                    "content_cache_key": content_cache_key,
+                }
             summaries.append(
                 SessionSummary(
                     id=session_id,
@@ -76,9 +129,13 @@ class SessionStore:
                     log_path=log_path,
                     cwd=str(record.get("cwd", "")),
                     preview=preview,
-                    message_count=len(messages),
+                    message_count=message_count,
+                    content_cache_key=content_cache_key,
                 )
             )
+        self._save_metadata_cache(new_cache)
+        self._list_cache_mtime = index_mtime
+        self._list_cache_result = summaries
         return summaries
 
     def get_session(self, session_id: str) -> SessionDetail:
@@ -94,6 +151,7 @@ class SessionStore:
             messages=messages,
             preview=preview,
             cwd=str(record.get("cwd", "")),
+            content_cache_key=conversation_cache_key(session_id, messages, preview),
         )
 
     def rename_session(self, session_id: str, new_title: str) -> Path:
@@ -121,8 +179,9 @@ class SessionStore:
         state_backup_path = None
         if matched_state:
             state_backup_path = self._backup_state()
-            self._update_state_title(session_id, clean_title)
+            self.thread_renamer.set_names({session_id: clean_title})
 
+        self._invalidate_list_cache()
         return backup_path or state_backup_path or self._backup_index()
 
     def rename_sessions(self, titles_by_id: dict[str, str]) -> Path | None:
@@ -164,7 +223,8 @@ class SessionStore:
         state_backup_path = None
         if state_titles:
             state_backup_path = self._backup_state()
-            self._update_state_titles(state_titles)
+            self.thread_renamer.set_names(state_titles)
+        self._invalidate_list_cache()
         return backup_path or state_backup_path
 
     def delete_session(self, session_id: str) -> DeleteResult:
@@ -201,11 +261,16 @@ class SessionStore:
                     counter += 1
                 shutil.move(str(log_path), str(target))
                 moved_logs.append(target)
+        self._invalidate_list_cache()
         return DeleteResult(
             backup_path=backup_path,
             moved_logs=moved_logs,
             state_backup_path=state_backup_path,
         )
+
+    def _invalidate_list_cache(self) -> None:
+        self._list_cache_mtime = None
+        self._list_cache_result = None
 
     def _read_index_records(self) -> list[dict[str, Any]]:
         if not self.index_path.exists():
@@ -359,18 +424,6 @@ class SessionStore:
                 is not None
             )
 
-    def _update_state_title(self, session_id: str, title: str) -> None:
-        self._update_state_titles({session_id: title})
-
-    def _update_state_titles(self, titles_by_id: dict[str, str]) -> None:
-        if not titles_by_id:
-            return
-        with sqlite3.connect(self._state_path()) as conn:
-            conn.executemany(
-                "update threads set title = ? where id = ?",
-                [(title, session_id) for session_id, title in titles_by_id.items()],
-            )
-
     def _delete_state_thread(self, session_id: str) -> None:
         with sqlite3.connect(self._state_path()) as conn:
             if self._table_exists(conn, "thread_dynamic_tools"):
@@ -393,6 +446,37 @@ class SessionStore:
 
     def _column_exists(self, conn: sqlite3.Connection, table: str, column: str) -> bool:
         return any(row[1] == column for row in conn.execute(f"pragma table_info({table})"))
+
+    def _load_metadata_cache(self) -> dict[str, Any]:
+        try:
+            if self.metadata_cache_path.exists():
+                data = json.loads(self.metadata_cache_path.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+        return {}
+
+    def _save_metadata_cache(self, cache: dict[str, Any]) -> None:
+        try:
+            self.metadata_cache_path.write_text(
+                json.dumps(cache, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _metadata_cache_hit(self, item: Any, log_path: Path | None) -> dict[str, Any] | None:
+        if (
+            not item
+            or not item.get("content_cache_key")
+            or not log_path
+            or not log_path.exists()
+        ):
+            return None
+        stat = log_path.stat()
+        if item.get("mtime") == stat.st_mtime and item.get("size") == stat.st_size:
+            return item
+        return None
 
     def _read_messages(self, log_path: Path) -> list[SessionMessage]:
         messages: list[SessionMessage] = []
@@ -484,3 +568,17 @@ class SessionStore:
             counter += 1
         shutil.copy2(state_path, backup_path)
         return backup_path
+
+
+def conversation_cache_key(
+    session_id: str,
+    messages: list[SessionMessage],
+    preview: str,
+) -> str:
+    message_payload = [
+        [message.role, message.timestamp or "", message.text]
+        for message in messages
+    ]
+    payload = ["v5-conversation-content", session_id, message_payload, preview]
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()

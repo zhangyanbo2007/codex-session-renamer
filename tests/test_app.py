@@ -17,8 +17,7 @@ from starlette.requests import Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from session_renamer.app import create_app
-from session_renamer.qwen_title import LocalTitleGenerator
+from session_renamer.app import create_app, _merge_existing_summary
 from session_renamer.store import SessionStore
 
 
@@ -28,6 +27,13 @@ class FixedTitleGenerator:
 
     def suggest(self, messages, fallback):
         return self.title
+
+
+class FixtureTitleGenerator:
+    def suggest(self, messages, fallback):
+        if fallback == "第二个旧标题":
+            return "这是一个测试｜这是一个测试"
+        return "Codex会话管理工具｜Codex会话管理工具"
 
 
 class CountingTitleGenerator:
@@ -168,7 +174,7 @@ class AppTest(unittest.TestCase):
         self.app = create_app(
             store=store,
             access_token="secret",
-            title_generator=LocalTitleGenerator(),
+            title_generator=FixtureTitleGenerator(),
         )
 
     def tearDown(self):
@@ -259,6 +265,7 @@ class AppTest(unittest.TestCase):
         self.assertIn("一键全部改名", text)
         self.assertIn("一键标题推荐", text)
         self.assertIn("删除会话", text)
+        self.assertIn("v0.6.2", text)
 
     def test_list_page_marks_sessions_not_using_model_title(self):
         response = self.call_endpoint("/", method="GET")
@@ -345,6 +352,14 @@ class AppTest(unittest.TestCase):
 
         self.assertNotIn('class="status-badge needs-rename"', text)
 
+    def test_list_page_does_not_mark_renamed_sessions_as_changed(self):
+        self.call_endpoint("/auto-rename-all")
+
+        response = self.call_endpoint("/", method="GET")
+        text = self.response_text(response)
+
+        self.assertNotIn('class="status-badge changed"', text)
+
     def test_list_page_can_filter_to_sessions_not_using_model_title(self):
         self.call_endpoint(
             "/sessions/{session_id}/auto-rename",
@@ -407,8 +422,8 @@ class AppTest(unittest.TestCase):
         text = self.response_text(response, query_string=query_string.encode("utf-8"))
 
         self.assertIn("释放会话变化", text)
-        self.assertIn("alpha｜Codex会话管理工具｜Codex会话管理工具", text)
-        self.assertNotIn("beta｜这是一个测试｜这是一个测试</a>", text)
+        self.assertIn("alpha｜Codex会话管理工具任务｜Codex会话管理工具", text)
+        self.assertNotIn("beta｜这是一个测试任务｜这是一个测试</a>", text)
 
     def test_passive_list_view_does_not_clear_changed_filter(self):
         self.call_endpoint("/auto-rename-all")
@@ -435,7 +450,7 @@ class AppTest(unittest.TestCase):
         response = self.call_endpoint("/", method="GET", query_string=query_string)
         text = self.response_text(response, query_string=query_string.encode("utf-8"))
 
-        self.assertIn("alpha｜Codex会话管理工具｜Codex会话管理工具", text)
+        self.assertIn("alpha｜Codex会话管理工具任务｜Codex会话管理工具", text)
         self.assertNotIn("没有可展示的会话记录", text)
 
     def test_changed_filter_view_does_not_clear_changed_filter(self):
@@ -463,9 +478,36 @@ class AppTest(unittest.TestCase):
         second_response = self.call_endpoint("/", method="GET", query_string=query_string)
         second_text = self.response_text(second_response, query_string=query_string.encode("utf-8"))
 
-        self.assertIn("alpha｜Codex会话管理工具｜Codex会话管理工具", first_text)
-        self.assertIn("alpha｜Codex会话管理工具｜Codex会话管理工具", second_text)
+        self.assertIn("alpha｜Codex会话管理工具任务｜Codex会话管理工具", first_text)
+        self.assertIn("alpha｜Codex会话管理工具任务｜Codex会话管理工具", second_text)
         self.assertNotIn("没有可展示的会话记录", second_text)
+
+    def test_recommend_all_keeps_changed_sessions_visible_until_rename(self):
+        self.call_endpoint("/auto-rename-all")
+        log_path = self.codex_home / "sessions" / "2026" / "07" / "08" / "rollout-2026-07-08T00-00-00-abc123.jsonl"
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-08T01:05:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "新增：推荐后仍待改名"}],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+        query_string = urlencode({"token": "secret", "changed": "1"})
+
+        self.call_endpoint("/recommend-all", query_string=query_string)
+        response = self.call_endpoint("/", method="GET", query_string=query_string)
+        text = self.response_text(response, query_string=query_string.encode("utf-8"))
+
+        self.assertIn("alpha｜Codex会话管理工具任务｜Codex会话管理工具", text)
+        self.assertNotIn("没有可展示的会话记录", text)
 
     def test_changed_filter_excludes_unchanged_sessions_that_only_need_rename(self):
         self.call_endpoint("/recommend-all")
@@ -512,8 +554,8 @@ class AppTest(unittest.TestCase):
         response = self.call_endpoint("/", method="GET", query_string=query_string)
         text = self.response_text(response, query_string=query_string.encode("utf-8"))
 
-        self.assertIn("没有可展示的会话记录", text)
-        self.assertNotIn("abc123", text)
+        self.assertNotIn("没有可展示的会话记录", text)
+        self.assertIn("abc123", text)
 
     def test_list_page_disables_browser_cache_for_realtime_filters(self):
         response = self.call_endpoint("/", method="GET")
@@ -589,6 +631,26 @@ class AppTest(unittest.TestCase):
         self.assertIn("旧标题", text)
         self.assertNotIn("第二个旧标题", text)
 
+    def test_changed_session_preserves_existing_summary_segment_after_model_rename(self):
+        self.assertEqual(
+            _merge_existing_summary(
+                "alpha｜稳态总览｜稳态近况",
+                "alpha｜新总览｜新近况",
+                "/work/alpha",
+            ),
+            "alpha｜稳态总览｜新近况",
+        )
+
+    def test_changed_session_does_not_merge_first_rename(self):
+        self.assertEqual(
+            _merge_existing_summary(
+                "旧标题",
+                "alpha｜新总览｜新近况",
+                "/work/alpha",
+            ),
+            "alpha｜新总览｜新近况",
+        )
+
     def test_list_page_can_search_by_current_title(self):
         query_string = urlencode({"token": "secret", "q": "第二个旧标题"})
         response = self.call_endpoint("/", method="GET", query_string=query_string)
@@ -628,7 +690,7 @@ class AppTest(unittest.TestCase):
         self.assertNotIn("旧标题</a>", text)
         self.assertNotIn("第二个旧标题</a>", text)
 
-    def test_suggest_api_returns_local_title(self):
+    def test_suggest_api_returns_generated_title(self):
         response = self.call_endpoint(
             "/api/sessions/{session_id}/suggest",
             method="GET",
@@ -638,15 +700,22 @@ class AppTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             json.loads(response.body.decode("utf-8"))["suggested_title"],
-            "alpha｜Codex会话管理工具｜Codex会话管理工具",
+            "alpha｜Codex会话管理工具任务｜Codex会话管理工具",
         )
 
-    def test_suggested_title_uses_current_directory_basename_as_first_level(self):
+    def test_index_page_does_not_generate_title_recommendations(self):
+        store = SessionStore(self.index_path, self.codex_home)
+        self.app = create_app(
+            store=store,
+            access_token="secret",
+            title_generator=FailingTitleGenerator(),
+        )
+
         response = self.call_endpoint("/", method="GET")
         text = self.response_text(response)
 
-        self.assertIn("alpha｜Codex会话管理工具｜Codex会话管理工具", text)
-        self.assertIn("beta｜这是一个测试｜这是一个测试", text)
+        self.assertNotIn("alpha｜Codex会话管理工具任务｜Codex会话管理工具", text)
+        self.assertNotIn("beta｜这是一个测试任务｜这是一个测试", text)
 
     def test_rename_post_updates_index(self):
         response = self.call_endpoint(
@@ -712,7 +781,7 @@ class AppTest(unittest.TestCase):
             "/sessions/abc123?token=secret&status=renamed",
         )
         self.assertIn(
-            '"thread_name":"alpha｜Codex会话管理工具｜Codex会话管理工具"',
+            '"thread_name":"alpha｜Codex会话管理工具任务｜Codex会话管理工具"',
             self.index_path.read_text(encoding="utf-8"),
         )
 
@@ -722,8 +791,8 @@ class AppTest(unittest.TestCase):
         self.assertEqual(response.status_code, 303)
         self.assertEqual(response.headers["location"], "/?token=secret&status=renamed_all")
         index_text = self.index_path.read_text(encoding="utf-8")
-        self.assertIn('"thread_name":"alpha｜Codex会话管理工具｜Codex会话管理工具"', index_text)
-        self.assertIn('"thread_name":"beta｜这是一个测试｜这是一个测试"', index_text)
+        self.assertIn('"thread_name":"alpha｜Codex会话管理工具任务｜Codex会话管理工具"', index_text)
+        self.assertIn('"thread_name":"beta｜这是一个测试任务｜这是一个测试"', index_text)
 
     def test_auto_rename_all_preserves_directory_filter_in_redirect(self):
         response = self.call_endpoint(
@@ -769,8 +838,94 @@ class AppTest(unittest.TestCase):
             page,
             query_string=urlencode({"token": "secret", "directory": "/work/alpha"}).encode("utf-8"),
         )
-        self.assertIn("alpha｜刷新标题｜最近状态", text)
-        self.assertNotIn("beta｜刷新标题｜最近状态", text)
+        self.assertIn("alpha｜刷新标题任务｜最近状态", text)
+        self.assertNotIn("beta｜刷新标题任务｜最近状态", text)
+
+    def test_recommend_all_prefills_rename_input_without_changing_current_title(self):
+        store = SessionStore(self.index_path, self.codex_home)
+        self.app = create_app(
+            store=store,
+            access_token="secret",
+            title_generator=FixedTitleGenerator("刷新标题｜最近状态"),
+        )
+
+        self.call_endpoint("/recommend-all")
+        response = self.call_endpoint("/", method="GET")
+        text = self.response_text(response)
+
+        self.assertIn(">旧标题</a>", text)
+        self.assertIn(
+            'name="thread_name" value="alpha｜刷新标题任务｜最近状态"',
+            text,
+        )
+
+    def test_list_page_places_single_recommend_before_single_rename(self):
+        response = self.call_endpoint("/", method="GET")
+        text = self.response_text(response)
+
+        recommend = text.index("单会话标题推荐")
+        rename = text.index("单会话改名")
+        self.assertLess(recommend, rename)
+        self.assertIn("/sessions/abc123/recommend?", text)
+
+    def test_single_recommend_updates_only_recommendation(self):
+        store = SessionStore(self.index_path, self.codex_home)
+        generator = CountingTitleGenerator("会话管理优化｜增加单条推荐按钮")
+        self.app = create_app(
+            store=store,
+            access_token="secret",
+            title_generator=generator,
+        )
+
+        response = self.call_endpoint(
+            "/sessions/{session_id}/recommend",
+            query_string=urlencode({"token": "secret", "next": "list"}),
+            session_id="abc123",
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(generator.calls, 1)
+        self.assertIn("status=recommended", response.headers["location"])
+        self.assertIn('"thread_name": "旧标题"', self.index_path.read_text())
+        list_response = self.call_endpoint("/", method="GET")
+        text = self.response_text(list_response)
+        self.assertIn(
+            'name="thread_name" value="alpha｜会话管理优化任务｜增加单条推荐按钮"',
+            text,
+        )
+
+    def test_detail_page_shows_single_recommend_action(self):
+        response = self.call_endpoint(
+            "/sessions/{session_id}", method="GET", session_id="abc123"
+        )
+        text = self.response_text(response, path="/sessions/abc123")
+
+        self.assertIn("重新推荐", text)
+        self.assertIn("/sessions/abc123/recommend?token=secret", text)
+        self.assertIn('class="detail-actions"', text)
+        self.assertNotIn("任务线索", text)
+        self.assertNotIn('class="preview-block"', text)
+
+    def test_detail_single_recommend_prefills_rename_input(self):
+        store = SessionStore(self.index_path, self.codex_home)
+        self.app = create_app(
+            store=store,
+            access_token="secret",
+            title_generator=FixedTitleGenerator("会话管理优化｜增加详情推荐按钮"),
+        )
+        response = self.call_endpoint(
+            "/sessions/{session_id}/recommend", session_id="abc123"
+        )
+        self.assertEqual(response.status_code, 303)
+
+        detail_response = self.call_endpoint(
+            "/sessions/{session_id}", method="GET", session_id="abc123"
+        )
+        text = self.response_text(detail_response, path="/sessions/abc123")
+        self.assertIn(
+            'name="thread_name" value="alpha｜会话管理优化任务｜增加详情推荐按钮"',
+            text,
+        )
 
     def test_list_page_shows_recommend_all_feedback(self):
         query_string = urlencode({"token": "secret", "status": "recommended"})
@@ -779,27 +934,40 @@ class AppTest(unittest.TestCase):
 
         self.assertIn("已完成一键标题推荐", text)
 
-    def test_placeholder_recommendation_is_displayed_but_not_written(self):
+    def test_recommend_all_generates_title_only_on_request(self):
         store = SessionStore(self.index_path, self.codex_home)
+        generator = CountingTitleGenerator("未命名会话")
         self.app = create_app(
             store=store,
             access_token="secret",
-            title_generator=FixedTitleGenerator("未命名会话"),
+            title_generator=generator,
         )
 
         response = self.call_endpoint("/", method="GET")
-        text = self.response_text(response)
+        self.assertEqual(generator.calls, 0)
 
-        self.assertIn("暂无推荐", text)
-        self.assertNotIn('value="未命名会话"', text)
-
-        response = self.call_endpoint("/auto-rename-all")
-
+        response = self.call_endpoint("/recommend-all")
         self.assertEqual(response.status_code, 303)
-        index_text = self.index_path.read_text(encoding="utf-8")
-        self.assertIn('"thread_name": "旧标题"', index_text)
-        self.assertIn('"thread_name": "第二个旧标题"', index_text)
-        self.assertNotIn("未命名会话", index_text)
+        self.assertGreater(generator.calls, 0)
+
+    def test_recommend_all_refreshes_unchanged_cached_sessions(self):
+        store = SessionStore(self.index_path, self.codex_home)
+        generator = CountingTitleGenerator("第一版标题｜第一版状态")
+        self.app = create_app(
+            store=store,
+            access_token="secret",
+            title_generator=generator,
+        )
+
+        self.call_endpoint("/recommend-all")
+        self.assertEqual(generator.calls, 2)
+        generator.title = "第二版标题｜第二版状态"
+
+        self.call_endpoint("/recommend-all")
+
+        self.assertEqual(generator.calls, 4)
+        page = self.call_endpoint("/", method="GET")
+        self.assertIn("alpha｜第二版标题任务｜第二版状态", self.response_text(page))
 
     def test_list_page_shows_rename_feedback(self):
         query_string = urlencode({"token": "secret", "status": "renamed"})
@@ -844,7 +1012,7 @@ class AppTest(unittest.TestCase):
         text = self.response_text(response, path="/sessions/abc123")
 
         self.assertIn(">保存</button>", text)
-        self.assertIn("推荐标题：", text)
+        self.assertIn("推荐标题", text)
         self.assertNotIn("使用建议并保存", text)
         self.assertNotIn("/sessions/abc123/auto-rename", text)
 
@@ -865,7 +1033,7 @@ class AppTest(unittest.TestCase):
         second_response = self.call_endpoint("/", method="GET")
         text = self.response_text(second_response)
 
-        self.assertIn("alpha｜缓存标题｜最近状态", text)
+        self.assertIn("alpha｜缓存标题任务｜最近状态", text)
 
     def test_delete_post_removes_session_from_index(self):
         response = self.call_endpoint(

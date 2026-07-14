@@ -2,23 +2,63 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ENV_FILE="${SESSION_RENAMER_ENV_FILE:-${PROJECT_DIR}/.env.local}"
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+  set +a
+fi
+
 LOCAL_PORT="${SESSION_RENAMER_PORT:-8891}"
 REMOTE_PORT="${SESSION_RENAMER_REMOTE_PORT:-8887}"
-FRP_TOML="/home/zhangyanbo/frp/frpc.toml"
-FRP_ADMIN="http://127.0.0.1:7400"
-VPS_HOST="8.163.122.236"
-PROXY_NAME="node37-session-renamer"
-LOG_FILE="/tmp/session-renamer.log"
-PID_FILE="/tmp/session-renamer.pid"
+FRP_CONFIG="${SESSION_RENAMER_FRP_CONFIG:-}"
+FRP_BIN="${SESSION_RENAMER_FRP_BIN:-frpc}"
+FRP_ADMIN="${SESSION_RENAMER_FRP_ADMIN:-}"
+PUBLIC_HOST="${SESSION_RENAMER_PUBLIC_HOST:-}"
+PROXY_NAME="${SESSION_RENAMER_FRP_PROXY_NAME:-codex-session-renamer}"
+MANAGE_CONFIG="${SESSION_RENAMER_FRP_MANAGE_CONFIG:-0}"
+LOG_FILE="${SESSION_RENAMER_LOG_FILE:-/tmp/codex-session-renamer.log}"
+PID_FILE="${SESSION_RENAMER_PID_FILE:-/tmp/codex-session-renamer.pid}"
 
-log() { echo -e "\033[1;36m[session-renamer]\033[0m $*"; }
-ok()  { echo -e "\033[1;32m[session-renamer]\033[0m $*"; }
-err() { echo -e "\033[1;31m[session-renamer]\033[0m $*" >&2; }
+log() { printf '[codex-session-renamer] %s\n' "$*"; }
+ok() { printf '[codex-session-renamer] %s\n' "$*"; }
+err() { printf '[codex-session-renamer] %s\n' "$*" >&2; }
+
+require_value() {
+  local variable="$1"
+  local value="$2"
+  if [[ -z "${value}" ]]; then
+    err "Missing required configuration: ${variable}"
+    return 1
+  fi
+}
+
+validate_config() {
+  require_value "SESSION_RENAMER_FRP_CONFIG" "${FRP_CONFIG}"
+  require_value "SESSION_RENAMER_PUBLIC_HOST" "${PUBLIC_HOST}"
+  if [[ ! -f "${FRP_CONFIG}" ]]; then
+    err "FRP config does not exist: ${FRP_CONFIG}"
+    return 1
+  fi
+  if ! command -v "${FRP_BIN}" >/dev/null 2>&1 && [[ ! -x "${FRP_BIN}" ]]; then
+    err "FRP client is not executable: ${FRP_BIN}"
+    return 1
+  fi
+}
 
 ensure_frp_proxy() {
-  if ! grep -q "name = \"${PROXY_NAME}\"" "${FRP_TOML}" 2>/dev/null; then
-    log "向 frpc.toml 追加隧道 ${PROXY_NAME}..."
-    cat >> "${FRP_TOML}" <<EOF
+  if rg -q "name = \"${PROXY_NAME}\"" "${FRP_CONFIG}" 2>/dev/null \
+    || grep -q "name = \"${PROXY_NAME}\"" "${FRP_CONFIG}" 2>/dev/null; then
+    return
+  fi
+  if [[ "${MANAGE_CONFIG}" != "1" ]]; then
+    err "Proxy ${PROXY_NAME} is absent from ${FRP_CONFIG}."
+    err "Add it manually or set SESSION_RENAMER_FRP_MANAGE_CONFIG=1."
+    return 1
+  fi
+  log "Adding proxy ${PROXY_NAME} to configured FRP file"
+  cat >> "${FRP_CONFIG}" <<EOF
 
 [[proxies]]
 name = "${PROXY_NAME}"
@@ -27,51 +67,60 @@ localIP = "127.0.0.1"
 localPort = ${LOCAL_PORT}
 remotePort = ${REMOTE_PORT}
 EOF
-  fi
+}
+
+frp_process_pattern() {
+  printf 'frpc .*%s' "$(basename "${FRP_CONFIG}")"
 }
 
 reload_frpc() {
-  if pgrep -f 'frpc .*frpc\.toml' >/dev/null 2>&1; then
-    log "frpc 已运行，热重载..."
-    curl -sf -X GET "${FRP_ADMIN}/api/reload" >/dev/null
+  local pattern
+  pattern="$(frp_process_pattern)"
+  if pgrep -f "${pattern}" >/dev/null 2>&1; then
+    if [[ -n "${FRP_ADMIN}" ]]; then
+      log "Reloading the running FRP client"
+      curl -sf -X GET "${FRP_ADMIN%/}/api/reload" >/dev/null
+    else
+      log "FRP is already running; no admin endpoint configured"
+    fi
   else
-    log "frpc 未运行，启动 frpc..."
-    cd /home/zhangyanbo/frp
-    setsid nohup ./frpc -c frpc.toml > frpc.log 2>&1 < /dev/null &
+    log "Starting FRP client"
+    setsid nohup "${FRP_BIN}" -c "${FRP_CONFIG}" > "${LOG_FILE}.frpc" 2>&1 < /dev/null &
     sleep 2
   fi
-  pgrep -f 'frpc .*frpc\.toml' >/dev/null 2>&1 && ok "frpc 运行中" || { err "frpc 未运行"; return 1; }
+  pgrep -f "${pattern}" >/dev/null 2>&1 || {
+    err "FRP client did not start"
+    return 1
+  }
 }
 
 start_local() {
-  if [[ -z "${SESSION_RENAMER_TOKEN:-}" ]]; then
-    err "请先设置 SESSION_RENAMER_TOKEN"
-    return 1
-  fi
+  require_value "SESSION_RENAMER_TOKEN" "${SESSION_RENAMER_TOKEN:-}"
   if curl -sf -m 2 "http://127.0.0.1:${LOCAL_PORT}/health" >/dev/null 2>&1; then
-    log "本地 :${LOCAL_PORT} 已运行，跳过启动"
+    log "Local service on port ${LOCAL_PORT} is already running"
     lsof -ti TCP:"${LOCAL_PORT}" -sTCP:LISTEN 2>/dev/null | head -n 1 > "${PID_FILE}" || true
-  else
-    log "启动本地服务 :${LOCAL_PORT}..."
-    cd "${PROJECT_DIR}"
-    setsid env SESSION_RENAMER_TOKEN="${SESSION_RENAMER_TOKEN}" SESSION_RENAMER_PORT="${LOCAL_PORT}" bash run.sh > "${LOG_FILE}" 2>&1 < /dev/null &
-    echo "$!" > "${PID_FILE}"
-    disown "$!" 2>/dev/null || true
-    sleep 2
+    return
   fi
+  log "Starting local service on port ${LOCAL_PORT}"
+  cd "${PROJECT_DIR}"
+  setsid env \
+    SESSION_RENAMER_TOKEN="${SESSION_RENAMER_TOKEN}" \
+    SESSION_RENAMER_PORT="${LOCAL_PORT}" \
+    bash run.sh > "${LOG_FILE}" 2>&1 < /dev/null &
+  echo "$!" > "${PID_FILE}"
+  disown "$!" 2>/dev/null || true
+  sleep 2
   curl -sf -m 3 "http://127.0.0.1:${LOCAL_PORT}/health" >/dev/null
 }
 
 cmd_start() {
+  validate_config
   ensure_frp_proxy
   start_local
   reload_frpc
-  echo ""
-  ok "已就绪"
-  echo "  本机: http://127.0.0.1:${LOCAL_PORT}/?token=<SESSION_RENAMER_TOKEN>"
-  echo "  公网: http://${VPS_HOST}:${REMOTE_PORT}/?token=<SESSION_RENAMER_TOKEN>"
-  echo "  日志: ${LOG_FILE}"
-  echo "  PID:  ${PID_FILE}"
+  ok "Ready"
+  printf 'Local:  http://127.0.0.1:%s/?token=<SESSION_RENAMER_TOKEN>\n' "${LOCAL_PORT}"
+  printf 'Public: http://%s:%s/?token=<SESSION_RENAMER_TOKEN>\n' "${PUBLIC_HOST}" "${REMOTE_PORT}"
 }
 
 cmd_stop() {
@@ -80,31 +129,28 @@ cmd_stop() {
   if [[ -n "${pid}" ]]; then
     kill ${pid}
     for _ in {1..20}; do
-      if ! lsof -ti ":${LOCAL_PORT}" >/dev/null 2>&1; then
-        break
-      fi
+      lsof -ti ":${LOCAL_PORT}" >/dev/null 2>&1 || break
       sleep 0.2
     done
-    ok "本地服务 :${LOCAL_PORT} 已停止"
+    ok "Local service stopped"
   else
-    log "本地服务 :${LOCAL_PORT} 未运行"
+    log "Local service is not running"
   fi
-  ok "frpc 保持运行"
+  ok "FRP client was left running"
 }
 
 cmd_status() {
-  echo "=== session-renamer 状态 ==="
-  echo -n "本地服务 :${LOCAL_PORT}  -> "
-  curl -sf -m 3 "http://127.0.0.1:${LOCAL_PORT}/health" >/dev/null 2>&1 && ok "运行中" || err "未运行"
-  echo -n "frpc              -> "
-  pgrep -f 'frpc .*frpc\.toml' >/dev/null 2>&1 && ok "运行中" || err "未运行"
-  echo -n "公网 /health      -> "
-  curl -sf -m 5 "http://${VPS_HOST}:${REMOTE_PORT}/health" >/dev/null 2>&1 && ok "可访问" || err "不可达"
+  validate_config
+  printf 'Local service: '
+  curl -sf -m 3 "http://127.0.0.1:${LOCAL_PORT}/health" >/dev/null 2>&1 && echo running || echo stopped
+  printf 'Public health: '
+  curl -sf -m 5 "http://${PUBLIC_HOST}:${REMOTE_PORT}/health" >/dev/null 2>&1 && echo reachable || echo unreachable
 }
 
 case "${1:-start}" in
   start) cmd_start ;;
   stop) cmd_stop ;;
   status) cmd_status ;;
-  *) echo "用法: $0 [start|stop|status]"; exit 1 ;;
+  validate) validate_config && ok "Configuration is valid" ;;
+  *) err "Usage: $0 [start|stop|status|validate]"; exit 1 ;;
 esac
