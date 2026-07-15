@@ -27,10 +27,10 @@
           <strong>{{ suggested_title }}</strong>
         </div>
         <div class="detail-actions">
-          <form class="detail-recommend" method="post" action="/sessions/{{ session.id }}/recommend{% if token %}?token={{ token }}{% endif %}">
+          <form class="detail-recommend" method="post" action="/sessions/{{ session.id }}/recommend{% if token %}?token={{ token }}{% endif %}" data-recommend-api="/api/sessions/{{ session.id }}/recommend{% if token %}?token={{ token }}{% endif %}">
             <button class="secondary" type="submit">重新推荐</button>
           </form>
-          <form class="detail-rename" method="post" action="/sessions/{{ session.id }}/rename{% if token %}?token={{ token }}{% endif %}">
+          <form class="detail-rename" method="post" action="/sessions/{{ session.id }}/rename{% if token %}?token={{ token }}{% endif %}" data-rename-api="/api/sessions/{{ session.id }}/rename{% if token %}?token={{ token }}{% endif %}">
             <label class="sr-only" for="thread_name">新名称</label>
             <input id="thread_name" name="thread_name" value="{{ rename_value }}" maxlength="120">
             <button type="submit">保存</button>
@@ -59,6 +59,69 @@
     </main>
     <script>
       (() => {
+        const recommendForm = document.querySelector('form.detail-recommend[data-recommend-api]');
+        if (recommendForm) {
+          recommendForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const button = recommendForm.querySelector('button');
+            const apiUrl = recommendForm.dataset.recommendApi;
+            const originalLabel = button.textContent;
+            button.disabled = true;
+            button.textContent = '推荐中…';
+            try {
+              const response = await fetch(apiUrl, { method: 'POST' });
+              if (!response.ok) throw new Error('request failed');
+              const data = await response.json();
+              const titleEl = document.querySelector('.detail-recommendation strong');
+              if (titleEl) titleEl.textContent = data.suggested_title;
+              const renameInput = document.querySelector('.detail-rename input[name="thread_name"]');
+              if (renameInput) renameInput.value = data.rename_value;
+              button.textContent = data.can_use_suggestion ? '已推荐' : '暂无推荐';
+            } catch (err) {
+              button.textContent = '推荐失败，请重试';
+            } finally {
+              window.setTimeout(() => {
+                button.disabled = false;
+                button.textContent = originalLabel;
+              }, 1600);
+            }
+          });
+        }
+
+        const renameForm = document.querySelector('form.detail-rename[data-rename-api]');
+        if (renameForm) {
+          renameForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const button = renameForm.querySelector('button');
+            const input = renameForm.querySelector('input[name="thread_name"]');
+            const apiUrl = renameForm.dataset.renameApi;
+            const originalLabel = button.textContent;
+            button.disabled = true;
+            button.textContent = '保存中…';
+            try {
+              const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams(new FormData(renameForm)).toString(),
+              });
+              if (!response.ok) throw new Error('request failed');
+              const data = await response.json();
+              if (input) input.value = data.rename_value;
+              const heading = document.querySelector('.topbar h1');
+              if (heading) heading.textContent = data.display_thread_name;
+              document.title = `${data.display_thread_name} - Codex会话管理工具`;
+              button.textContent = '已保存';
+            } catch (err) {
+              button.textContent = '保存失败，请重试';
+            } finally {
+              window.setTimeout(() => {
+                button.disabled = false;
+                button.textContent = originalLabel;
+              }, 1600);
+            }
+          });
+        }
+
         const flash = document.querySelector('[data-auto-dismiss="true"]');
         if (!flash) return;
         const url = new URL(window.location.href);

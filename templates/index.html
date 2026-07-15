@@ -78,10 +78,10 @@
                 {% if selected_changed %}释放会话变化{% else %}只看会话变化{% endif %}
               </button>
             </form>
-            <form method="post" action="/recommend-all{% if list_query %}?{{ list_query }}{% endif %}">
+            <form method="post" action="/recommend-all{% if list_query %}?{{ list_query }}{% endif %}" data-recommend-all-api="/api/recommend-all{% if list_query %}?{{ list_query }}{% endif %}">
               <button class="secondary" type="submit">一键标题推荐</button>
             </form>
-            <form method="post" action="/auto-rename-all{% if list_query %}?{{ list_query }}{% endif %}">
+            <form method="post" action="/auto-rename-all{% if list_query %}?{{ list_query }}{% endif %}" data-auto-rename-all-api="/api/auto-rename-all{% if list_query %}?{{ list_query }}{% endif %}">
               <button type="submit">一键全部改名</button>
             </form>
           </div>
@@ -102,7 +102,7 @@
           <div class="directory-sessions">
             {% for row in group.rows %}
             {% set session = row.session %}
-            <article class="session-row{% if row.needs_model_rename %} needs-model-rename{% endif %}">
+            <article class="session-row{% if row.needs_model_rename %} needs-model-rename{% endif %}" data-session-id="{{ session.id }}">
               <div class="session-main">
                 <div class="session-title-row">
                   <a class="session-title" href="/sessions/{{ session.id }}{% if token %}?token={{ token }}{% endif %}">{{ row.display_thread_name }}</a>
@@ -130,14 +130,14 @@
                   <strong>{{ row.suggested_title }}</strong>
                 </div>
                 <div class="row-actions">
-                  <form class="single-recommend" method="post" action="/sessions/{{ session.id }}/recommend?{% if list_query %}{{ list_query }}&{% endif %}next=list">
+                  <form class="single-recommend" method="post" action="/sessions/{{ session.id }}/recommend?{% if list_query %}{{ list_query }}&{% endif %}next=list" data-recommend-api="/api/sessions/{{ session.id }}/recommend{% if token %}?token={{ token }}{% endif %}">
                     <button class="secondary" type="submit">单会话标题推荐</button>
                   </form>
-                  <form class="inline-rename" method="post" action="/sessions/{{ session.id }}/rename?{% if list_query %}{{ list_query }}&{% endif %}next=list">
+                  <form class="inline-rename" method="post" action="/sessions/{{ session.id }}/rename?{% if list_query %}{{ list_query }}&{% endif %}next=list" data-rename-api="/api/sessions/{{ session.id }}/rename{% if token %}?token={{ token }}{% endif %}">
                     <input name="thread_name" value="{{ row.rename_value }}" maxlength="120" aria-label="新会话名">
                     <button class="secondary" type="submit">单会话改名</button>
                   </form>
-                  <form class="delete-form inline-delete" method="post" action="/sessions/{{ session.id }}/delete{% if list_query %}?{{ list_query }}{% endif %}" onsubmit="return confirm('确认删除这个会话？日志会移入 trash，索引会备份。')">
+                  <form class="delete-form inline-delete" method="post" action="/sessions/{{ session.id }}/delete{% if list_query %}?{{ list_query }}{% endif %}" data-delete-api="/api/sessions/{{ session.id }}/delete{% if token %}?token={{ token }}{% endif %}" onsubmit="return confirm('确认删除这个会话？日志会移入 trash，索引会备份。')">
                     <button class="danger" type="submit">删除会话</button>
                   </form>
                 </div>
@@ -190,6 +190,191 @@
             filterForm.addEventListener('submit', syncSearchQuery);
           }
         }
+
+        const syncBadge = (row, className, label, shouldShow) => {
+          if (!row) return;
+          let badge = row.querySelector(`.status-badge.${className}`);
+          if (shouldShow) {
+            if (!badge) {
+              badge = document.createElement('span');
+              badge.className = `status-badge ${className}`;
+              badge.textContent = label;
+              const titleRow = row.querySelector('.session-title-row');
+              if (titleRow) titleRow.appendChild(badge);
+            }
+          } else if (badge) {
+            badge.remove();
+          }
+        };
+
+        const autoRenameAllForm = document.querySelector('form[data-auto-rename-all-api]');
+        if (autoRenameAllForm) {
+          autoRenameAllForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const button = autoRenameAllForm.querySelector('button');
+            const apiUrl = autoRenameAllForm.dataset.autoRenameAllApi;
+            const originalLabel = button.textContent;
+            button.disabled = true;
+            button.textContent = '改名中…';
+            try {
+              const response = await fetch(apiUrl, { method: 'POST' });
+              if (!response.ok) throw new Error('request failed');
+              const data = await response.json();
+              data.results.forEach((result) => {
+                const row = document.querySelector(`.session-row[data-session-id="${result.session_id}"]`);
+                if (!row) return;
+                const titleLink = row.querySelector('.session-title');
+                if (titleLink) titleLink.textContent = result.display_thread_name;
+                const renameInput = row.querySelector('.inline-rename input[name="thread_name"]');
+                if (renameInput) renameInput.value = result.rename_value;
+                row.classList.toggle('needs-model-rename', result.needs_model_rename);
+                syncBadge(row, 'needs-rename', '未改名', result.needs_model_rename);
+                syncBadge(row, 'changed', '会话变化', false);
+              });
+              button.textContent = data.status === 'renamed_all' ? '已全部改名' : '暂无推荐';
+            } catch (err) {
+              button.textContent = '改名失败，请重试';
+            } finally {
+              window.setTimeout(() => {
+                button.disabled = false;
+                button.textContent = originalLabel;
+              }, 1600);
+            }
+          });
+        }
+
+        document.querySelectorAll('form.inline-delete[data-delete-api]').forEach((form) => {
+          form.addEventListener('submit', async (event) => {
+            if (event.defaultPrevented) return;
+            event.preventDefault();
+            const button = form.querySelector('button');
+            const row = form.closest('.session-row');
+            const group = form.closest('.directory-group');
+            const apiUrl = form.dataset.deleteApi;
+            button.disabled = true;
+            button.textContent = '删除中…';
+            try {
+              const response = await fetch(apiUrl, { method: 'POST' });
+              if (!response.ok) throw new Error('request failed');
+              if (row) row.remove();
+              if (group) {
+                const remaining = group.querySelectorAll('.session-row').length;
+                if (remaining === 0) {
+                  group.remove();
+                } else {
+                  const countEl = group.querySelector('.directory-head span');
+                  if (countEl) countEl.textContent = `${remaining} 条`;
+                }
+              }
+            } catch (err) {
+              button.disabled = false;
+              button.textContent = '删除失败，请重试';
+              window.setTimeout(() => {
+                button.textContent = '删除会话';
+              }, 1600);
+            }
+          });
+        });
+
+        const recommendAllForm = document.querySelector('form[data-recommend-all-api]');
+        if (recommendAllForm) {
+          recommendAllForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const button = recommendAllForm.querySelector('button');
+            const apiUrl = recommendAllForm.dataset.recommendAllApi;
+            const originalLabel = button.textContent;
+            button.disabled = true;
+            button.textContent = '推荐中…';
+            try {
+              const response = await fetch(apiUrl, { method: 'POST' });
+              if (!response.ok) throw new Error('request failed');
+              const data = await response.json();
+              data.results.forEach((result) => {
+                const row = document.querySelector(`.session-row[data-session-id="${result.session_id}"]`);
+                if (!row) return;
+                const titleEl = row.querySelector('.recommendation strong');
+                if (titleEl) titleEl.textContent = result.suggested_title;
+                const renameInput = row.querySelector('.inline-rename input[name="thread_name"]');
+                if (renameInput) renameInput.value = result.rename_value;
+              });
+              button.textContent = data.status === 'recommended' ? '已推荐' : '暂无推荐';
+            } catch (err) {
+              button.textContent = '推荐失败，请重试';
+            } finally {
+              window.setTimeout(() => {
+                button.disabled = false;
+                button.textContent = originalLabel;
+              }, 1600);
+            }
+          });
+        }
+
+        document.querySelectorAll('form.inline-rename[data-rename-api]').forEach((form) => {
+          form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const button = form.querySelector('button');
+            const input = form.querySelector('input[name="thread_name"]');
+            const row = form.closest('.session-row');
+            const apiUrl = form.dataset.renameApi;
+            const originalLabel = button.textContent;
+            button.disabled = true;
+            button.textContent = '保存中…';
+            try {
+              const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams(new FormData(form)).toString(),
+              });
+              if (!response.ok) throw new Error('request failed');
+              const data = await response.json();
+              if (input) input.value = data.rename_value;
+              const titleLink = row && row.querySelector('.session-title');
+              if (titleLink) titleLink.textContent = data.display_thread_name;
+              if (row) {
+                row.classList.toggle('needs-model-rename', data.needs_model_rename);
+                syncBadge(row, 'needs-rename', '未改名', data.needs_model_rename);
+                syncBadge(row, 'changed', '会话变化', data.conversation_changed);
+              }
+              button.textContent = '已保存';
+            } catch (err) {
+              button.textContent = '保存失败，请重试';
+            } finally {
+              window.setTimeout(() => {
+                button.disabled = false;
+                button.textContent = originalLabel;
+              }, 1600);
+            }
+          });
+        });
+
+        document.querySelectorAll('form.single-recommend[data-recommend-api]').forEach((form) => {
+          form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const button = form.querySelector('button');
+            const row = form.closest('.session-row');
+            const apiUrl = form.dataset.recommendApi;
+            const originalLabel = button.textContent;
+            button.disabled = true;
+            button.textContent = '推荐中…';
+            try {
+              const response = await fetch(apiUrl, { method: 'POST' });
+              if (!response.ok) throw new Error('request failed');
+              const data = await response.json();
+              const titleEl = row && row.querySelector('.recommendation strong');
+              if (titleEl) titleEl.textContent = data.suggested_title;
+              const renameInput = row && row.querySelector('.inline-rename input[name="thread_name"]');
+              if (renameInput) renameInput.value = data.rename_value;
+              button.textContent = data.can_use_suggestion ? '已推荐' : '暂无推荐';
+            } catch (err) {
+              button.textContent = '推荐失败，请重试';
+            } finally {
+              window.setTimeout(() => {
+                button.disabled = false;
+                button.textContent = originalLabel;
+              }, 1600);
+            }
+          });
+        });
 
         const flash = document.querySelector('[data-auto-dismiss="true"]');
         if (!flash) return;

@@ -1164,6 +1164,21 @@ class AppTest(unittest.TestCase):
         self.assertIn("status=no_recommendation", response.headers["location"])
         self.assertEqual(self.title_cache_or_empty(), {})
 
+    def test_raw_path_fallback_title_fails_closed_for_single_recommend(self):
+        # 会话证据不足时，QwenTitleGenerator 会原样返回 fallback（可能就是 cwd 本身）。
+        # 这种裸路径没有信息量，不应该被包装成看似正常的"任务"标题。
+        self.app.state.title_generator = FixedTitleGenerator(
+            "/home/zhangyanbo/owner/xiaowangzi/projects/privacy-engineering"
+        )
+
+        response = self.call_endpoint(
+            "/sessions/{session_id}/recommend",
+            session_id="abc123",
+        )
+
+        self.assertIn("status=no_recommendation", response.headers["location"])
+        self.assertEqual(self.title_cache_or_empty(), {})
+
     def test_generator_exception_fails_closed_for_bulk_recommend(self):
         self.app.state.title_generator = FailingTitleGenerator()
 
@@ -1381,6 +1396,33 @@ class AppTest(unittest.TestCase):
             "/sessions/abc123?token=secret&status=renamed",
         )
 
+    def test_json_rename_endpoint_updates_index_without_redirect(self):
+        response = self.call_endpoint(
+            "/api/sessions/{session_id}/rename",
+            method="POST",
+            body=urlencode({"thread_name": "新标题"}),
+            headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+            session_id="abc123",
+        )
+
+        payload = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(payload["status"], "renamed")
+        self.assertEqual(payload["thread_name"], "新标题")
+        self.assertEqual(payload["display_thread_name"], "新标题")
+        self.assertFalse(payload["conversation_changed"])
+        self.assertIn('"thread_name":"新标题"', self.index_path.read_text(encoding="utf-8"))
+
+    def test_json_rename_endpoint_rejects_missing_token(self):
+        with self.assertRaises(HTTPException):
+            self.call_endpoint(
+                "/api/sessions/{session_id}/rename",
+                method="POST",
+                token=None,
+                body=urlencode({"thread_name": "新标题"}),
+                headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+                session_id="abc123",
+            )
+
     def test_auto_rename_post_uses_suggested_title(self):
         response = self.call_endpoint(
             "/sessions/{session_id}/auto-rename",
@@ -1470,6 +1512,28 @@ class AppTest(unittest.TestCase):
             'name="thread_name" value="alpha｜刷新标题任务｜最近状态"',
             text,
         )
+
+    def test_json_recommend_all_returns_per_session_results(self):
+        store = SessionStore(self.index_path, self.codex_home)
+        self.app = create_app(
+            store=store,
+            access_token="secret",
+            title_generator=FixedTitleGenerator("刷新标题｜最近状态"),
+        )
+
+        response = self.call_endpoint("/api/recommend-all")
+        payload = json.loads(response.body.decode("utf-8"))
+
+        self.assertEqual(payload["status"], "recommended")
+        self.assertTrue(payload["results"])
+        by_id = {result["session_id"]: result for result in payload["results"]}
+        self.assertIn("abc123", by_id)
+        self.assertEqual(
+            by_id["abc123"]["suggested_title"],
+            "alpha｜刷新标题任务｜最近状态",
+        )
+        self.assertTrue(by_id["abc123"]["can_use_suggestion"])
+        self.assertIn('"thread_name": "旧标题"', self.index_path.read_text())
 
     def test_list_page_places_single_recommend_before_single_rename(self):
         response = self.call_endpoint("/", method="GET")
@@ -1713,6 +1777,33 @@ class AppTest(unittest.TestCase):
             response.headers["location"],
             "/?token=secret&directory=%2Fwork%2Falpha&q=%E4%BC%9A%E8%AF%9D%E6%94%B9%E5%90%8D&status=deleted",
         )
+
+    def test_json_delete_endpoint_removes_session_without_redirect(self):
+        response = self.call_endpoint(
+            "/api/sessions/{session_id}/delete",
+            session_id="abc123",
+        )
+
+        payload = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(payload["status"], "deleted")
+        self.assertEqual(payload["session_id"], "abc123")
+        index_text = self.index_path.read_text(encoding="utf-8")
+        self.assertNotIn("abc123", index_text)
+        self.assertIn("def456", index_text)
+
+    def test_json_auto_rename_all_returns_applied_titles(self):
+        response = self.call_endpoint("/api/auto-rename-all")
+
+        payload = json.loads(response.body.decode("utf-8"))
+        self.assertEqual(payload["status"], "renamed_all")
+        by_id = {result["session_id"]: result for result in payload["results"]}
+        self.assertEqual(
+            by_id["abc123"]["thread_name"],
+            "alpha｜Codex会话管理工具任务｜Codex会话管理工具",
+        )
+        self.assertFalse(by_id["abc123"]["needs_model_rename"])
+        index_text = self.index_path.read_text(encoding="utf-8")
+        self.assertIn('"thread_name":"alpha｜Codex会话管理工具任务｜Codex会话管理工具"', index_text)
 
     def test_list_page_shows_delete_feedback(self):
         query_string = urlencode({"token": "secret", "status": "deleted"})

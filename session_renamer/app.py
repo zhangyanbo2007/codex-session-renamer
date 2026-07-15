@@ -137,9 +137,7 @@ def create_app(
         )
         return _with_no_store(response)
 
-    @app.post("/auto-rename-all")
-    async def auto_rename_all(request: Request) -> RedirectResponse:
-        current_token = require_token(request)
+    def perform_auto_rename_all(request: Request):
         (
             _all_sessions,
             _directory_options,
@@ -157,7 +155,6 @@ def create_app(
             detail = details.get(session.id) or app.state.store.get_session(session.id)
             needs_model_rename = _needs_model_rename(session.thread_name, session.cwd)
             conversation_changed = _conversation_changed(detail, title_cache)
-            needs_summary = needs_model_rename or conversation_changed
             if selected_needs_rename and not needs_model_rename:
                 continue
             if selected_changed and not conversation_changed:
@@ -181,6 +178,24 @@ def create_app(
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             mark_content_applied(applied_recommendations.values())
+        return (
+            selected_directory,
+            search_query,
+            selected_needs_rename,
+            selected_changed,
+            applied_recommendations,
+        )
+
+    @app.post("/auto-rename-all")
+    async def auto_rename_all(request: Request) -> RedirectResponse:
+        current_token = require_token(request)
+        (
+            selected_directory,
+            search_query,
+            selected_needs_rename,
+            selected_changed,
+            applied_recommendations,
+        ) = perform_auto_rename_all(request)
         return RedirectResponse(
             url=_list_url(
                 current_token,
@@ -188,9 +203,45 @@ def create_app(
                 search_query,
                 needs_rename=selected_needs_rename,
                 changed=selected_changed,
-                status="renamed_all" if titles_by_id else "no_recommendation",
+                status="renamed_all" if applied_recommendations else "no_recommendation",
             ),
             status_code=303,
+        )
+
+    @app.post("/api/auto-rename-all")
+    async def auto_rename_all_json(request: Request) -> JSONResponse:
+        require_token(request)
+        (
+            _selected_directory,
+            _search_query,
+            _selected_needs_rename,
+            _selected_changed,
+            applied_recommendations,
+        ) = perform_auto_rename_all(request)
+        renamed = bool(applied_recommendations)
+        return _with_no_store(
+            JSONResponse(
+                {
+                    "status": "renamed_all" if renamed else "no_recommendation",
+                    "status_message": _status_message(
+                        "renamed_all" if renamed else "no_recommendation"
+                    ),
+                    "results": [
+                        {
+                            "session_id": session_id,
+                            "thread_name": title,
+                            "display_thread_name": _display_thread_name(title),
+                            "rename_value": _rename_value(title),
+                            "needs_model_rename": _needs_model_rename(
+                                title, detail.cwd
+                            ),
+                        }
+                        for session_id, (detail, title, _owner) in (
+                            applied_recommendations.items()
+                        )
+                    ],
+                }
+            )
         )
 
     @app.post("/sessions/{session_id}/recommend")
@@ -229,9 +280,38 @@ def create_app(
             status_code=303,
         )
 
-    @app.post("/recommend-all")
-    async def recommend_all(request: Request) -> RedirectResponse:
-        current_token = require_token(request)
+    @app.post("/api/sessions/{session_id}/recommend")
+    async def recommend_session_json(request: Request, session_id: str) -> JSONResponse:
+        require_token(request)
+        try:
+            detail = app.state.store.get_session(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+        title_cache = refresh_title_cache_from_disk()
+        conversation_changed = _conversation_changed(detail, title_cache)
+        suggested_title = suggested_title_for(detail, refresh=True)
+        has_recommendation = _is_actionable_title(suggested_title)
+        if has_recommendation:
+            mark_single_recommendation(detail, conversation_changed)
+        return _with_no_store(
+            JSONResponse(
+                {
+                    "status": "recommended" if has_recommendation else "no_recommendation",
+                    "status_message": _status_message(
+                        "recommended" if has_recommendation else "no_recommendation"
+                    ),
+                    "suggested_title": suggested_title,
+                    "can_use_suggestion": has_recommendation,
+                    "rename_value": (
+                        suggested_title
+                        if has_recommendation
+                        else _rename_value(detail.thread_name)
+                    ),
+                }
+            )
+        )
+
+    def perform_recommend_all(request: Request):
         (
             _all_sessions,
             _directory_options,
@@ -261,7 +341,7 @@ def create_app(
                 len(recommendation_jobs) or 1,
             ),
         )
-        recommended_details = []
+        results = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
                 executor.submit(
@@ -272,12 +352,34 @@ def create_app(
                 for detail in recommendation_jobs
             }
             for future in as_completed(futures):
-                if _is_actionable_title(future.result()):
-                    recommended_details.append(futures[future])
+                results.append((futures[future], future.result()))
 
-        for detail in recommended_details:
+        for detail, suggested_title in results:
+            if not _is_actionable_title(suggested_title):
+                continue
             if recommendation_owner_for(detail) == "manual":
                 mark_recommendation_pending(detail)
+        return (
+            selected_directory,
+            search_query,
+            selected_needs_rename,
+            selected_changed,
+            results,
+        )
+
+    @app.post("/recommend-all")
+    async def recommend_all(request: Request) -> RedirectResponse:
+        current_token = require_token(request)
+        (
+            selected_directory,
+            search_query,
+            selected_needs_rename,
+            selected_changed,
+            results,
+        ) = perform_recommend_all(request)
+        recommended = any(
+            _is_actionable_title(title) for _detail, title in results
+        )
         return RedirectResponse(
             url=_list_url(
                 current_token,
@@ -285,11 +387,46 @@ def create_app(
                 search_query,
                 needs_rename=selected_needs_rename,
                 changed=selected_changed,
-                status=(
-                    "recommended" if recommended_details else "no_recommendation"
-                ),
+                status="recommended" if recommended else "no_recommendation",
             ),
             status_code=303,
+        )
+
+    @app.post("/api/recommend-all")
+    async def recommend_all_json(request: Request) -> JSONResponse:
+        require_token(request)
+        (
+            _selected_directory,
+            _search_query,
+            _selected_needs_rename,
+            _selected_changed,
+            results,
+        ) = perform_recommend_all(request)
+        recommended = any(
+            _is_actionable_title(title) for _detail, title in results
+        )
+        return _with_no_store(
+            JSONResponse(
+                {
+                    "status": "recommended" if recommended else "no_recommendation",
+                    "status_message": _status_message(
+                        "recommended" if recommended else "no_recommendation"
+                    ),
+                    "results": [
+                        {
+                            "session_id": detail.id,
+                            "suggested_title": title,
+                            "can_use_suggestion": _is_actionable_title(title),
+                            "rename_value": (
+                                title
+                                if _is_actionable_title(title)
+                                else _rename_value(detail.thread_name)
+                            ),
+                        }
+                        for detail, title in results
+                    ],
+                }
+            )
         )
 
     @app.get("/sessions/{session_id}", response_class=HTMLResponse)
@@ -341,6 +478,21 @@ def create_app(
             )
         )
 
+    def perform_rename(session_id: str, new_title: str):
+        detail = app.state.store.get_session(session_id)
+        title_cache = refresh_title_cache_from_disk()
+        recommended_title = passive_title_for(detail, title_cache)
+        owner = "manual"
+        if (
+            recommended_title
+            and _canonical_full_title(new_title, detail.cwd)
+            == _canonical_full_title(recommended_title, detail.cwd)
+        ):
+            owner = recommendation_owner_for(detail)
+        app.state.store.rename_session(session_id, new_title)
+        mark_content_applied([(detail, new_title, owner)])
+        return detail
+
     @app.post("/sessions/{session_id}/rename")
     async def rename(request: Request, session_id: str) -> RedirectResponse:
         current_token = require_token(request)
@@ -348,18 +500,7 @@ def create_app(
         values = parse_qs(body, keep_blank_values=True)
         new_title = values.get("thread_name", [""])[0]
         try:
-            detail = app.state.store.get_session(session_id)
-            title_cache = refresh_title_cache_from_disk()
-            recommended_title = passive_title_for(detail, title_cache)
-            owner = "manual"
-            if (
-                recommended_title
-                and _canonical_full_title(new_title, detail.cwd)
-                == _canonical_full_title(recommended_title, detail.cwd)
-            ):
-                owner = recommendation_owner_for(detail)
-            app.state.store.rename_session(session_id, new_title)
-            mark_content_applied([(detail, new_title, owner)])
+            perform_rename(session_id, new_title)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
         except ValueError as exc:
@@ -382,6 +523,32 @@ def create_app(
         return RedirectResponse(
             url=_session_url(session_id, current_token, status="renamed"),
             status_code=303,
+        )
+
+    @app.post("/api/sessions/{session_id}/rename")
+    async def rename_session_json(request: Request, session_id: str) -> JSONResponse:
+        require_token(request)
+        body = (await request.body()).decode("utf-8")
+        values = parse_qs(body, keep_blank_values=True)
+        new_title = values.get("thread_name", [""])[0]
+        try:
+            detail = perform_rename(session_id, new_title)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _with_no_store(
+            JSONResponse(
+                {
+                    "status": "renamed",
+                    "status_message": _status_message("renamed"),
+                    "thread_name": new_title,
+                    "display_thread_name": _display_thread_name(new_title),
+                    "rename_value": _rename_value(new_title),
+                    "needs_model_rename": _needs_model_rename(new_title, detail.cwd),
+                    "conversation_changed": False,
+                }
+            )
         )
 
     @app.post("/sessions/{session_id}/auto-rename")
@@ -433,6 +600,23 @@ def create_app(
                 status="deleted",
             ),
             status_code=303,
+        )
+
+    @app.post("/api/sessions/{session_id}/delete")
+    async def delete_session_json(request: Request, session_id: str) -> JSONResponse:
+        require_token(request)
+        try:
+            app.state.store.delete_session(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+        return _with_no_store(
+            JSONResponse(
+                {
+                    "status": "deleted",
+                    "status_message": _status_message("deleted"),
+                    "session_id": session_id,
+                }
+            )
         )
 
     def list_state_for_request(request: Request):
@@ -731,6 +915,17 @@ def _overall_owner_for(detail, title_cache: dict[str, str]) -> str:
     return "manual"
 
 
+_PATH_TOKEN_BOUNDARY = r"(?:^|[^\w+#])"
+_ABSOLUTE_SLASH_PATH = re.compile(_PATH_TOKEN_BOUNDARY + r"/[^/\s]")
+_WINDOWS_DRIVE_PATH = re.compile(_PATH_TOKEN_BOUNDARY + r"[A-Za-z]:[\\/]")
+
+
+def _looks_like_raw_path(value: str) -> bool:
+    # 任务标题的核心对象来自会话原始 thread_name 兜底值时可能直接是 cwd
+    # 本身（例如空会话触发 fallback），这种裸路径没有信息量，宁可不推荐。
+    return bool(_ABSOLUTE_SLASH_PATH.search(value) or _WINDOWS_DRIVE_PATH.search(value))
+
+
 def _sanitize_title(title: str) -> str:
     clean = _clean_whitespace(title)
     if _is_placeholder_title(clean):
@@ -759,6 +954,8 @@ def _content_title_for_directory(raw_title: str, cwd: str) -> str:
     if len(parts) == 1:
         parts = [parts[0], parts[0]]
     if not parts:
+        return NO_RECOMMENDATION_TITLE
+    if _looks_like_raw_path(parts[0]):
         return NO_RECOMMENDATION_TITLE
     return "｜".join(
         [
