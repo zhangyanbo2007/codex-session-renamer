@@ -282,7 +282,9 @@ class QwenTitleTest(unittest.TestCase):
             "/workspace/repo迁移任务",
             "检查 /srv/app/config.yaml 配置任务",
             "/Users/alice/report.pdf分析任务",
-            "迁移/workspace/repo任务",
+            "检查:/etc配置任务",
+            "检查（/etc）配置任务",
+            "迁移到:/workspace任务",
             r"C:\logs\schema.sql迁移任务",
             r"\\server\share\report.pdf分析任务",
             "./schema.sql迁移任务",
@@ -306,6 +308,10 @@ class QwenTitleTest(unittest.TestCase):
             "CI/CD流水线优化任务",
             "TCP/IP协议调试任务",
             "客户端/服务器架构设计任务",
+            "CI/CD/DevOps工具链优化任务",
+            "TCP/IP/UDP协议对比任务",
+            "客户端/服务器/数据库架构设计任务",
+            "迁移/workspace/repo任务",
         )
         for title in valid_titles:
             with self.subTest(title=title):

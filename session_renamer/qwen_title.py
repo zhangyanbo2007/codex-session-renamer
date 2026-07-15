@@ -194,17 +194,16 @@ def _overall_title_failure(title: str) -> str:
     return ""
 
 
-_SLASH_PATH_TOKEN = re.compile(r"(?:^|\s)/[^/\s]")
-_MULTI_SEGMENT_SLASH_PATH = re.compile(r"/[^/\s]+/[^/\s]+")
-_WINDOWS_DRIVE_PATH = re.compile(r"[A-Za-z]:[\\/]")
-_DOT_TRAVERSAL_PATH = re.compile(r"(?<!\.)\.\.?[\\/]")
-_UNC_PATH = re.compile(r"\\\\[^\\\s]+\\[^\\\s]+")
+_PATH_TOKEN_BOUNDARY = r"(?:^|[\s:：=＝(（\[【{｛<〈《「『\"'“‘])"
+_ABSOLUTE_SLASH_PATH = re.compile(_PATH_TOKEN_BOUNDARY + r"/[^/\s]")
+_WINDOWS_DRIVE_PATH = re.compile(_PATH_TOKEN_BOUNDARY + r"[A-Za-z]:[\\/]")
+_DOT_TRAVERSAL_PATH = re.compile(_PATH_TOKEN_BOUNDARY + r"\.\.?[\\/]")
+_UNC_PATH = re.compile(_PATH_TOKEN_BOUNDARY + r"\\\\[^\\\s]+\\[^\\\s]+")
 
 
 def _contains_unmistakable_path(title: str) -> bool:
     return bool(
-        _SLASH_PATH_TOKEN.search(title)
-        or _MULTI_SEGMENT_SLASH_PATH.search(title)
+        _ABSOLUTE_SLASH_PATH.search(title)
         or _WINDOWS_DRIVE_PATH.search(title)
         or _DOT_TRAVERSAL_PATH.search(title)
         or _UNC_PATH.search(title)
