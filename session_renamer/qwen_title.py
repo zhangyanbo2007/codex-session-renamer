@@ -50,28 +50,47 @@ class QwenTitleGenerator:
         overall_context = overall_title_context(messages)
         if not overall_context:
             return fallback
+        recent_context = recent_title_context(messages)
+        overall_evidence = "\n\n".join(
+            section for section in (overall_context, recent_context) if section
+        )
+        overall_system_prompt = (
+            "你是 Codex 会话整体任务标题生成器。只输出一个自然的任务名称。"
+            "标题必须直接标识核心任务，采用“具体对象+工作动作或目标+任务”，并以“任务”结尾。"
+            "“任务”前必须有明确的项目、产品、人物、工具或成果名称，严禁只输出“任务”。"
+            "路径、附件名、文件名及扩展名，以及截图、图片、文件、代码和日志，"
+            "都只是承载任务线索的输入载体，不能单独作为任务对象。"
+            "先识别任务对象、目标成果和主要动作，禁止复制用户原句、疑问句、路径或临时进度。"
+            "把故障现象改写为排查、修复或分析任务，把需求讨论改写为设计或实现任务。"
+            "例如：产品演示动画HTML制作任务、跨境视频需求分析任务、Codex插件故障排查任务。"
+            "对于只有产品名或工具名的稀疏会话，也要结合助手回复推断宽泛但具体的咨询或使用任务，"
+            "例如用户只说“codex”时生成“Codex使用咨询任务”，不能输出“暂无推荐”。"
+            "只有纯问候、纯测试或完全无对象内容时输出“暂无推荐”。"
+        )
+        overall_user_prompt = (
+            f"当前标题（仅作为任务线索，不要照抄）：{fallback}\n\n"
+            f"根据完整会话线索生成整体任务标题：\n\n{overall_evidence}"
+        )
         raw_overall = self._complete(
-            (
-                "你是 Codex 会话整体任务标题生成器。只输出一个自然的任务名称。"
-                "标题必须直接标识核心任务，采用“具体对象+工作动作或目标+任务”，并以“任务”结尾。"
-                "“任务”前必须有明确的项目、产品、人物、工具或成果名称，严禁只输出“任务”。"
-                "先识别任务对象、目标成果和主要动作，禁止复制用户原句、疑问句、路径或临时进度。"
-                "把故障现象改写为排查、修复或分析任务，把需求讨论改写为设计或实现任务。"
-                "例如：产品演示动画HTML制作任务、跨境视频需求分析任务、Codex插件故障排查任务。"
-                "对于只有产品名或工具名的稀疏会话，也要结合助手回复推断宽泛但具体的咨询或使用任务，"
-                "例如用户只说“codex”时生成“Codex使用咨询任务”，不能输出“暂无推荐”。"
-                "只有纯问候、纯测试或完全无对象内容时输出“暂无推荐”。"
-            ),
-            (
-                f"当前标题（仅作为任务线索，不要照抄）：{fallback}\n\n"
-                f"根据完整会话线索生成整体任务标题：\n\n{overall_context}"
-            ),
+            overall_system_prompt,
+            overall_user_prompt,
         )
         overall_title = _parse_component(raw_overall)
-        if not overall_title:
+        failure_reason = _overall_title_failure(overall_title)
+        if failure_reason:
+            raw_overall = self._complete(
+                (
+                    f"你是 Codex 会话整体任务标题纠错器。上次标题不合格：{failure_reason}。"
+                    "只输出一个修正后的自然任务名称，必须以“任务”结尾。"
+                    "路径、附件名、文件名、扩展名、截图、图片、文件、代码和日志只是输入载体，"
+                    "必须从同一会话线索中提炼具体任务对象和动作。"
+                ),
+                f"上次候选：{raw_overall}\n\n{overall_user_prompt}",
+            )
+            overall_title = _parse_component(raw_overall)
+        if _overall_title_failure(overall_title):
             return "暂无推荐"
 
-        recent_context = recent_title_context(messages)
         if not recent_context:
             return format_combined_title(overall_title, overall_title)
         raw_recent = self._complete(
@@ -156,6 +175,30 @@ def _parse_component(raw_title: str) -> str:
     if title in {"未命名", "未命名会话", "暂无推荐"}:
         return ""
     return title
+
+
+_CARRIER_ONLY_TITLE = re.compile(
+    r"^(?:截图|图片|图像|附件|文件|代码|日志|路径|附件名|文件名|扩展名)"
+    r"(?:分析|查看|检查|处理|整理|评估|识别|解读|修复|排查)$"
+)
+_FILENAME = re.compile(
+    r"[\w-]+\.(?:png|jpe?g|gif|webp|pdf|docx?|xlsx?|pptx?|txt|log|json|ya?ml|"
+    r"toml|py|js|ts|tsx|jsx|html?|css|md|csv|zip|tar|gz)",
+    flags=re.I,
+)
+
+
+def _overall_title_failure(title: str) -> str:
+    if not title:
+        return "候选标题为空"
+    if not title.endswith("任务"):
+        return "候选标题没有以任务结尾"
+    task_object = re.sub(r"\s+", "", title[: -len("任务")])
+    if "/" in task_object or "\\" in task_object or _FILENAME.search(task_object):
+        return "候选标题由路径、附件名、文件名或扩展名主导"
+    if _CARRIER_ONLY_TITLE.fullmatch(task_object):
+        return "候选标题只有通用输入载体和通用动作"
+    return ""
 
 
 def _env_value(*names: str) -> str:

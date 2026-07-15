@@ -54,6 +54,40 @@ class TitleSuggesterTest(unittest.TestCase):
 
         self.assertLessEqual(len(context), 99_000)
 
+    def test_overall_context_over_budget_keeps_first_and_newest_user_intent(self):
+        messages = [
+            SessionMessage(role="user", text=SYSTEM_USER_RECORD, timestamp=None),
+            SessionMessage(role="user", text="首个真实任务：排查远程输入法", timestamp=None),
+            SessionMessage(role="user", text="中间过程" + "甲" * 80, timestamp=None),
+            SessionMessage(role="user", text="最新意图：验证修复结果", timestamp=None),
+        ]
+
+        context = overall_title_context(messages, max_tokens=1_060)
+
+        self.assertIn("首个真实任务：排查远程输入法", context)
+        self.assertIn("最新意图：验证修复结果", context)
+        self.assertNotIn("中间过程", context)
+        self.assertLessEqual(len(context), 60)
+
+    def test_overall_context_prioritizes_partial_newest_turn_over_older_turn(self):
+        messages = [
+            SessionMessage(role="user", text=SYSTEM_USER_RECORD, timestamp=None),
+            SessionMessage(role="user", text="首个任务：定位问题", timestamp=None),
+            SessionMessage(role="user", text="较短旧进度", timestamp=None),
+            SessionMessage(
+                role="user",
+                text="最新任务：验证输入法修复" + "乙" * 50,
+                timestamp=None,
+            ),
+        ]
+
+        context = overall_title_context(messages, max_tokens=1_050)
+
+        self.assertIn("首个任务：定位问题", context)
+        self.assertIn("最新任务：验证", context)
+        self.assertNotIn("较短旧进度", context)
+        self.assertLessEqual(len(context), 50)
+
     def test_keeps_project_name_from_path_when_request_follows_it(self):
         messages = [
             SessionMessage(role="user", text=SYSTEM_USER_RECORD, timestamp=None),

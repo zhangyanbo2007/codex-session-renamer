@@ -44,19 +44,33 @@ def overall_title_context(
     overall_chunks = meaningful_user_candidates(messages)
     budget = max(0, max_tokens - INPUT_TOKEN_RESERVE)
     overall_prefix = "总任务线索：\n"
-    overall_lines = []
-    used = len(overall_prefix)
-    for chunk in overall_chunks:
-        line = f"- {chunk}"
-        separator = 1 if overall_lines else 0
-        if used + separator + len(line) > budget:
-            available = budget - used - separator
-            if available > 2:
-                overall_lines.append(line[:available])
-            break
-        overall_lines.append(line)
-        used += separator + len(line)
+    all_lines = [f"- {chunk}" for chunk in overall_chunks]
+    if len(overall_prefix) + len("\n".join(all_lines)) <= budget:
+        overall_lines = all_lines
+    else:
+        overall_lines = _first_and_newest_lines(all_lines, budget - len(overall_prefix))
     return overall_prefix + "\n".join(overall_lines) if overall_lines else ""
+
+
+def _first_and_newest_lines(lines: list[str], budget: int) -> list[str]:
+    if not lines or budget <= 2:
+        return []
+    first = lines[0][:budget]
+    selected = [first]
+    remaining = budget - len(first)
+    newest_lines = []
+    for line in reversed(lines[1:]):
+        required = len(line) + 1
+        if required <= remaining:
+            newest_lines.append(line)
+            remaining -= required
+        elif not newest_lines and remaining > 3:
+            newest_lines.append(line[: remaining - 1])
+            break
+        else:
+            break
+    selected.extend(reversed(newest_lines))
+    return selected
 
 
 def recent_title_context(messages: Iterable[SessionMessage]) -> str:

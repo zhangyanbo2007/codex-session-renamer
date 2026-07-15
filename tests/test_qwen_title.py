@@ -105,12 +105,105 @@ class QwenTitleTest(unittest.TestCase):
         self.assertIn("具体对象+工作动作或目标+任务", overall_body["messages"][0]["content"])
         self.assertIn("Codex插件故障排查任务", overall_body["messages"][0]["content"])
         self.assertIn("Codex使用咨询任务", overall_body["messages"][0]["content"])
+        self.assertIn("附件名", overall_body["messages"][0]["content"])
+        self.assertIn("不能单独作为任务对象", overall_body["messages"][0]["content"])
         self.assertIn("旧标题", overall_body["messages"][1]["content"])
         self.assertNotIn("/home/example", overall_body["messages"][1]["content"])
         self.assertNotIn("系统记录", overall_body["messages"][1]["content"])
         self.assertIn("整理浏览器书签任务", recent_body["messages"][1]["content"])
         self.assertIn("最近2轮", recent_body["messages"][1]["content"])
         self.assertIn("不能照抄", recent_body["messages"][0]["content"])
+
+    def test_overall_request_includes_recent_assistant_screenshot_evidence(self):
+        opener = FakeOpener(
+            [
+                {"choices": [{"message": {"content": "远程桌面输入法状态评估任务"}}]},
+                {"choices": [{"message": {"content": "确认控制端输入法归属"}}]},
+                {"choices": [{"message": {"content": "确认控制端输入法归属"}}]},
+            ]
+        )
+        generator = QwenTitleGenerator(api_key="test-key", opener=opener)
+
+        generator.suggest(
+            [
+                SessionMessage(role="user", text="系统记录", timestamp=None),
+                SessionMessage(
+                    role="user", text="screenshot-20260714-024720.png", timestamp=None
+                ),
+                SessionMessage(
+                    role="assistant",
+                    text="截图显示目标机输入法正常，问题属于控制端输入法归属。",
+                    timestamp=None,
+                ),
+            ],
+            fallback="截图",
+        )
+
+        overall_body = json.loads(opener.requests[0][0].data.decode("utf-8"))
+        overall_evidence = overall_body["messages"][1]["content"]
+        self.assertIn("screenshot-20260714-024720.png", overall_evidence)
+        self.assertIn("问题属于控制端输入法归属", overall_evidence)
+
+    def test_filename_dominated_overall_title_retries_once_with_same_evidence(self):
+        opener = FakeOpener(
+            [
+                {"choices": [{"message": {"content": "screenshot-20260714-024720.png任务"}}]},
+                {"choices": [{"message": {"content": "远程桌面输入法状态评估任务"}}]},
+                {"choices": [{"message": {"content": "确认控制端输入法归属"}}]},
+                {"choices": [{"message": {"content": "确认控制端输入法归属"}}]},
+            ]
+        )
+        generator = QwenTitleGenerator(api_key="test-key", opener=opener)
+        messages = [
+            SessionMessage(role="user", text="系统记录", timestamp=None),
+            SessionMessage(
+                role="user", text="screenshot-20260714-024720.png", timestamp=None
+            ),
+            SessionMessage(
+                role="assistant",
+                text="截图显示目标机输入法正常，问题属于控制端输入法归属。",
+                timestamp=None,
+            ),
+        ]
+
+        title = generator.suggest(messages, fallback="截图")
+
+        self.assertEqual(
+            title,
+            "远程桌面输入法状态评估任务｜确认控制端输入法归属",
+        )
+        self.assertEqual(len(opener.requests), 4)
+        first_body = json.loads(opener.requests[0][0].data.decode("utf-8"))
+        retry_body = json.loads(opener.requests[1][0].data.decode("utf-8"))
+        self.assertIn("文件名", retry_body["messages"][0]["content"])
+        self.assertIn("screenshot-20260714-024720.png任务", retry_body["messages"][1]["content"])
+        self.assertIn(
+            first_body["messages"][1]["content"],
+            retry_body["messages"][1]["content"],
+        )
+
+    def test_two_invalid_overall_titles_return_no_recommendation_without_recent_calls(self):
+        opener = FakeOpener(
+            [
+                {"choices": [{"message": {"content": "截图分析任务"}}]},
+                {"choices": [{"message": {"content": "report.log检查任务"}}]},
+            ]
+        )
+        generator = QwenTitleGenerator(api_key="test-key", opener=opener)
+
+        title = generator.suggest(
+            [
+                SessionMessage(role="user", text="系统记录", timestamp=None),
+                SessionMessage(role="user", text="screen.png", timestamp=None),
+                SessionMessage(
+                    role="assistant", text="日志说明鉴权失败。", timestamp=None
+                ),
+            ],
+            fallback="附件",
+        )
+
+        self.assertEqual(title, "暂无推荐")
+        self.assertEqual(len(opener.requests), 2)
 
     def test_model_rewrites_path_bearing_recent_draft(self):
         opener = FakeOpener(
