@@ -2,6 +2,13 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# 先加载 .env（共享配置，如 API key），再加载 .env.local（本地覆盖）
+if [[ -f "${PROJECT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${PROJECT_DIR}/.env"
+  set +a
+fi
 ENV_FILE="${SESSION_RENAMER_ENV_FILE:-${PROJECT_DIR}/.env.local}"
 if [[ -f "${ENV_FILE}" ]]; then
   set -a

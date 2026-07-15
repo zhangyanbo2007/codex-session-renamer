@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import socket
@@ -175,6 +176,10 @@ def create_title_generator() -> TitleGenerator:
         "DASH_SCOPE_API_KEY",
     )
     if not api_key:
+        logging.getLogger("session_renamer").warning(
+            "未配置 SESSION_RENAMER_DASHSCOPE_API_KEY/DASHSCOPE_API_KEY，"
+            "标题推荐降级为回显现有标题（不调用大模型）"
+        )
         return ExistingTitleGenerator()
     return QwenTitleGenerator(
         api_key=api_key,
