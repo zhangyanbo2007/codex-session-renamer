@@ -280,11 +280,15 @@ class QwenTitleTest(unittest.TestCase):
             "Node.js升级",
             "/tmp/schema.sql迁移任务",
             r"C:\logs\schema.sql迁移任务",
+            "./schema.sql迁移任务",
+            "../schema.sql迁移任务",
         )
 
         for title in invalid_titles:
             with self.subTest(title=title):
                 self.assertTrue(qwen_title._overall_title_failure(title))
+                review = json.dumps({"acceptable": True, "title": title})
+                self.assertEqual(qwen_title._parse_overall_review(review), "")
 
         valid_titles = (
             "应急评测泛化优化任务",
@@ -294,6 +298,9 @@ class QwenTitleTest(unittest.TestCase):
             "截图分析任务",
             "日志诊断任务",
             "schema.sql迁移任务",
+            "CI/CD流水线优化任务",
+            "TCP/IP协议调试任务",
+            "客户端/服务器架构设计任务",
         )
         for title in valid_titles:
             with self.subTest(title=title):

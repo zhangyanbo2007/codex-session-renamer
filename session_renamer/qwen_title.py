@@ -189,9 +189,24 @@ def _overall_title_failure(title: str) -> str:
     task_object = re.sub(r"\s+", "", title[: -len("任务")])
     if not task_object:
         return "候选标题缺少具体任务对象"
-    if "/" in task_object or "\\" in task_object:
-        return "候选标题包含路径分隔符"
+    if _contains_unmistakable_path(task_object):
+        return "候选标题包含明确文件路径"
     return ""
+
+
+_UNIX_ABSOLUTE_PATH = re.compile(
+    r"/(?:home|tmp|var|usr|etc|opt|root|data|mnt)(?:/|$)"
+)
+_WINDOWS_DRIVE_PATH = re.compile(r"[A-Za-z]:[\\/]")
+_DOT_TRAVERSAL_PATH = re.compile(r"(?<!\.)\.\.?[\\/]")
+
+
+def _contains_unmistakable_path(title: str) -> bool:
+    return bool(
+        _UNIX_ABSOLUTE_PATH.search(title)
+        or _WINDOWS_DRIVE_PATH.search(title)
+        or _DOT_TRAVERSAL_PATH.search(title)
+    )
 
 
 def _parse_overall_review(raw_review: str) -> str:
@@ -205,7 +220,7 @@ def _parse_overall_review(raw_review: str) -> str:
         return ""
     if not review["acceptable"]:
         return ""
-    title = _parse_component(review["title"])
+    title = re.sub(r"\s+", " ", review["title"]).strip()
     return "" if _overall_title_failure(title) else title
 
 
