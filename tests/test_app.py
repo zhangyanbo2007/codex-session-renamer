@@ -1698,40 +1698,6 @@ class AppTest(unittest.TestCase):
         self.assertNotIn("abc123", index_text)
         self.assertIn("def456", index_text)
 
-    def test_delete_post_removes_only_session_scoped_title_cache_keys(self):
-        cache_path = self.codex_home / "session-renamer-title-cache.json"
-        cache_path.write_text(
-            json.dumps(
-                {
-                    "session:abc123": "旧推荐任务｜旧近况",
-                    "pending-recommendation:abc123": "hash-abc",
-                    "prefill-recommendation:abc123": "hash-abc",
-                    "applied-content:abc123": "hash-abc",
-                    "applied-title:abc123": "alpha｜旧推荐任务｜旧近况",
-                    "overall-owner:abc123": "model",
-                    "recommendation-owner:hash-abc": "model",
-                    "unrelated:key": "keep",
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-
-        self.call_endpoint("/sessions/{session_id}/delete", session_id="abc123")
-
-        cache = self.read_title_cache()
-        for prefix in (
-            "session",
-            "pending-recommendation",
-            "prefill-recommendation",
-            "applied-content",
-            "applied-title",
-            "overall-owner",
-        ):
-            self.assertNotIn(f"{prefix}:abc123", cache)
-        self.assertEqual(cache["recommendation-owner:hash-abc"], "model")
-        self.assertEqual(cache["unrelated:key"], "keep")
-
     def test_delete_post_preserves_directory_filter_in_redirect(self):
         response = self.call_endpoint(
             "/sessions/{session_id}/delete",

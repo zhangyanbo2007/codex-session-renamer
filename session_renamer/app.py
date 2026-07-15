@@ -421,7 +421,6 @@ def create_app(
             app.state.store.delete_session(session_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
-        remove_session_cache_keys(session_id)
         return RedirectResponse(
             url=_list_url(
                 current_token,
@@ -630,18 +629,6 @@ def create_app(
                 ]
             )
         update_title_cache(updates, removals)
-
-    def remove_session_cache_keys(session_id: str) -> None:
-        update_title_cache(
-            removals=[
-                f"session:{session_id}",
-                f"pending-recommendation:{session_id}",
-                f"prefill-recommendation:{session_id}",
-                f"applied-content:{session_id}",
-                f"applied-title:{session_id}",
-                f"overall-owner:{session_id}",
-            ]
-        )
 
     return app
 
