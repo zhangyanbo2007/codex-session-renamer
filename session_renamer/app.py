@@ -29,9 +29,9 @@ def create_app(
     access_token: str | None = None,
     title_generator: TitleGenerator | None = None,
 ) -> FastAPI:
-    token = access_token if access_token is not None else os.environ.get("SESSION_RENAMER_TOKEN")
-    if not token:
-        raise RuntimeError("SESSION_RENAMER_TOKEN is required")
+    # An empty token disables app-level auth; keep the service on loopback or
+    # protect every management route with an authenticated HTTPS reverse proxy.
+    token = access_token if access_token is not None else os.environ.get("SESSION_RENAMER_TOKEN", "")
 
     app = FastAPI(title="Codex会话管理工具")
     app.state.store = store or SessionStore()
@@ -46,6 +46,8 @@ def create_app(
         app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     def require_token(request: Request) -> str:
+        if not app.state.access_token:
+            return ""
         provided = (
             request.query_params.get("token")
             or request.headers.get("x-session-renamer-token")
@@ -867,7 +869,7 @@ def _list_query(
     changed: bool = False,
     status: str = "",
 ) -> str:
-    values = [("token", token)]
+    values = [("token", token)] if token else []
     if directory:
         values.append(("directory", directory))
     if search_query:
@@ -889,11 +891,13 @@ def _list_url(
     changed: bool = False,
     status: str = "",
 ) -> str:
-    return f"/?{_list_query(token, directory, search_query, needs_rename, changed, status)}"
+    query = _list_query(token, directory, search_query, needs_rename, changed, status)
+    return f"/?{query}" if query else "/"
 
 
 def _session_url(session_id: str, token: str, status: str = "") -> str:
-    values = [("token", token)]
+    values = [("token", token)] if token else []
     if status:
         values.append(("status", status))
-    return f"/sessions/{session_id}?{urlencode(values)}"
+    query = urlencode(values)
+    return f"/sessions/{session_id}?{query}" if query else f"/sessions/{session_id}"

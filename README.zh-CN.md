@@ -2,7 +2,7 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-> 当前版本：v0.6.2
+> 当前版本：v0.7.0
 
 这是一个用于查看、重命名和清理 Codex 会话的本地 Web 工具。界面使用中文，适合管理分布在多个项目目录中的大量会话。
 
@@ -44,7 +44,8 @@
 - 只有在明确配置并触发 Qwen 标题推荐时，才会将清理后的会话上下文发送给模型服务商。
 - 缓存推荐标题和日志元数据，避免重复解析未变化的会话文件。
 - 仅在详情页、内容搜索、变化筛选和标题生成时加载完整会话内容。
-- 所有会话管理页面和操作都要求访问 Token。
+- 可选为所有会话管理页面和操作启用应用访问 Token。
+- 默认只监听本机回环地址；无 Token 模式仅用于本机访问，或已由带认证的 HTTPS 反向代理完整保护的部署。
 - 返回 `Cache-Control: no-store`，减少浏览器缓存私人会话内容。
 
 ## 环境要求
@@ -62,14 +63,26 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-生成强随机访问 Token 并启动本地服务：
+启动仅供本机访问的服务：
+
+```bash
+bash run.sh
+```
+
+打开：
+
+```text
+http://127.0.0.1:8891/
+```
+
+如需启用应用层认证，请先生成强随机访问 Token：
 
 ```bash
 export SESSION_RENAMER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 bash run.sh
 ```
 
-打开：
+然后打开：
 
 ```text
 http://127.0.0.1:8891/?token=<SESSION_RENAMER_TOKEN>
@@ -141,11 +154,12 @@ bash run.sh
 
 | 变量 | 是否必需 | 默认值 | 用途 |
 | --- | --- | --- | --- |
-| `SESSION_RENAMER_TOKEN` | 是 | 无 | 所有私人页面和操作的访问 Token |
+| `SESSION_RENAMER_TOKEN` | 否 | 空 | 所有私人页面和操作的访问 Token；留空时关闭应用层认证 |
 | `CODEX_HOME` | 否 | `~/.codex` | Codex 数据目录 |
 | `SESSION_RENAMER_INDEX_PATH` | 否 | `$CODEX_HOME/session_index.jsonl` | 旧版索引路径覆盖 |
 | `SESSION_RENAMER_HOST` | 否 | `127.0.0.1` | 本地监听地址 |
 | `SESSION_RENAMER_PORT` | 否 | `8891` | 本地 HTTP 端口 |
+| `SESSION_RENAMER_PUBLIC_URL` | 否 | 空 | FRP 辅助脚本显示的公网 HTTPS 地址，并用于绕过代理的健康检查 |
 | `SESSION_RENAMER_CODEX_BIN` | 否 | 自动检测 | 支持 app-server 的 Codex 可执行文件 |
 | `SESSION_RENAMER_TITLE_PROVIDER` | 否 | `qwen` | 使用 `local` 时不调用模型，仅保留现有标题 |
 | `SESSION_RENAMER_DASHSCOPE_API_KEY` | 使用 Qwen 时必需 | 无 | DashScope API Key |
@@ -166,11 +180,15 @@ bash run.sh
 ```bash
 export SESSION_RENAMER_FRP_CONFIG=/path/to/frpc.toml
 export SESSION_RENAMER_PUBLIC_HOST=example.com
-export SESSION_RENAMER_TOKEN='use-a-long-random-value'
 bash frp-tunnel.sh start
 ```
 
-其他变量包括 `SESSION_RENAMER_FRP_BIN`、`SESSION_RENAMER_FRP_ADMIN`、`SESSION_RENAMER_FRP_PROXY_NAME`、`SESSION_RENAMER_REMOTE_PORT`、`SESSION_RENAMER_FRP_MANAGE_CONFIG`、`SESSION_RENAMER_LOG_FILE` 和 `SESSION_RENAMER_PID_FILE`。
+公网暴露前必须选择一种认证边界：
+
+- 设置 `SESSION_RENAMER_TOKEN`，保留应用层 Token 认证。
+- 或让带认证的 HTTPS 反向代理位于 VPS 内部 FRP 端口之前，保持 `SESSION_RENAMER_TOKEN` 未设置，并将 `SESSION_RENAMER_PUBLIC_URL` 设为公网 HTTPS 地址。
+
+其他变量包括 `SESSION_RENAMER_PUBLIC_URL`、`SESSION_RENAMER_FRP_BIN`、`SESSION_RENAMER_FRP_ADMIN`、`SESSION_RENAMER_FRP_PROXY_NAME`、`SESSION_RENAMER_REMOTE_PORT`、`SESSION_RENAMER_FRP_MANAGE_CONFIG`、`SESSION_RENAMER_LOG_FILE` 和 `SESSION_RENAMER_PID_FILE`。
 
 只验证配置，不启动服务：
 
@@ -186,13 +204,16 @@ bash frp-tunnel.sh status
 bash frp-tunnel.sh stop
 ```
 
-> FRP TCP 转发不提供 TLS。Codex 会话可能包含源代码、凭据、个人信息和系统上下文。优先使用可信的私有网络。公网访问时，应在服务前增加 TLS 和更强的身份认证。不要在缺少强 Token 的情况下公开服务。
+配置 `SESSION_RENAMER_PUBLIC_URL` 后，`status` 会绕过本机出站代理直接检查公网地址。收到 HTTP 响应即证明传输链路可达，其中包括带认证反向代理预期返回的 `401`。
+
+> FRP TCP 转发本身不提供 TLS 或认证。Codex 会话可能包含源代码、凭据、个人信息和系统上下文。优先使用可信的私有网络。严禁将无 Token 模式直接暴露到公网；反向代理必须对所有管理路由强制认证。
 
 ## 安全说明
 
 - 首次使用前备份 `~/.codex`。
 - 批量改名前先检查推荐标题。
 - 删除操作会修改 Codex 索引并将日志移动到本地回收目录；操作前确认当前目录和搜索筛选范围。
+- 无 Token 模式会关闭应用层认证。除非带认证的 HTTPS 反向代理已经保护所有公网管理路由，否则应保留默认的本机回环监听。
 - 查询参数中的 Token 可能出现在浏览器历史和中间日志中；请使用私有网络，Token 可能泄露时应及时轮换。
 - 只有点击标题推荐按钮后，程序才会将清理后的会话上下文发送给配置的模型服务商。
 

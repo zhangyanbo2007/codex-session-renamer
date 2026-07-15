@@ -10,7 +10,7 @@
     <main class="page">
       <header class="topbar">
         <div>
-          <a class="back" href="/?token={{ token }}">← 返回列表</a>
+          <a class="back" href="{% if token %}/?token={{ token }}{% else %}/{% endif %}">← 返回列表</a>
           <h1>{{ display_thread_name }}</h1>
           <p>{{ session.updated_at }} · {{ session.id }}</p>
           <span class="app-version">v{{ app_version }}</span>
@@ -27,15 +27,15 @@
           <strong>{{ suggested_title }}</strong>
         </div>
         <div class="detail-actions">
-          <form class="detail-recommend" method="post" action="/sessions/{{ session.id }}/recommend?token={{ token }}">
+          <form class="detail-recommend" method="post" action="/sessions/{{ session.id }}/recommend{% if token %}?token={{ token }}{% endif %}">
             <button class="secondary" type="submit">重新推荐</button>
           </form>
-          <form class="detail-rename" method="post" action="/sessions/{{ session.id }}/rename?token={{ token }}">
+          <form class="detail-rename" method="post" action="/sessions/{{ session.id }}/rename{% if token %}?token={{ token }}{% endif %}">
             <label class="sr-only" for="thread_name">新名称</label>
             <input id="thread_name" name="thread_name" value="{{ rename_value }}" maxlength="120">
             <button type="submit">保存</button>
           </form>
-          <form class="delete-form detail-delete" method="post" action="/sessions/{{ session.id }}/delete?token={{ token }}" onsubmit="return confirm('确认删除这个会话？日志会移入 trash，索引会备份。')">
+          <form class="delete-form detail-delete" method="post" action="/sessions/{{ session.id }}/delete{% if token %}?token={{ token }}{% endif %}" onsubmit="return confirm('确认删除这个会话？日志会移入 trash，索引会备份。')">
             <button class="danger" type="submit">删除</button>
           </form>
         </div>

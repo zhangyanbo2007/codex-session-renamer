@@ -16,6 +16,7 @@ FRP_CONFIG="${SESSION_RENAMER_FRP_CONFIG:-}"
 FRP_BIN="${SESSION_RENAMER_FRP_BIN:-frpc}"
 FRP_ADMIN="${SESSION_RENAMER_FRP_ADMIN:-}"
 PUBLIC_HOST="${SESSION_RENAMER_PUBLIC_HOST:-}"
+PUBLIC_URL="${SESSION_RENAMER_PUBLIC_URL:-}"
 PROXY_NAME="${SESSION_RENAMER_FRP_PROXY_NAME:-codex-session-renamer}"
 MANAGE_CONFIG="${SESSION_RENAMER_FRP_MANAGE_CONFIG:-0}"
 LOG_FILE="${SESSION_RENAMER_LOG_FILE:-/tmp/codex-session-renamer.log}"
@@ -95,7 +96,6 @@ reload_frpc() {
 }
 
 start_local() {
-  require_value "SESSION_RENAMER_TOKEN" "${SESSION_RENAMER_TOKEN:-}"
   if curl -sf -m 2 "http://127.0.0.1:${LOCAL_PORT}/health" >/dev/null 2>&1; then
     log "Local service on port ${LOCAL_PORT} is already running"
     lsof -ti TCP:"${LOCAL_PORT}" -sTCP:LISTEN 2>/dev/null | head -n 1 > "${PID_FILE}" || true
@@ -104,7 +104,6 @@ start_local() {
   log "Starting local service on port ${LOCAL_PORT}"
   cd "${PROJECT_DIR}"
   setsid env \
-    SESSION_RENAMER_TOKEN="${SESSION_RENAMER_TOKEN}" \
     SESSION_RENAMER_PORT="${LOCAL_PORT}" \
     bash run.sh > "${LOG_FILE}" 2>&1 < /dev/null &
   echo "$!" > "${PID_FILE}"
@@ -119,8 +118,20 @@ cmd_start() {
   start_local
   reload_frpc
   ok "Ready"
-  printf 'Local:  http://127.0.0.1:%s/?token=<SESSION_RENAMER_TOKEN>\n' "${LOCAL_PORT}"
-  printf 'Public: http://%s:%s/?token=<SESSION_RENAMER_TOKEN>\n' "${PUBLIC_HOST}" "${REMOTE_PORT}"
+  if [[ -n "${SESSION_RENAMER_TOKEN:-}" ]]; then
+    printf 'Local:  http://127.0.0.1:%s/?token=<SESSION_RENAMER_TOKEN>\n' "${LOCAL_PORT}"
+  else
+    printf 'Local:  http://127.0.0.1:%s/\n' "${LOCAL_PORT}"
+  fi
+  if [[ -n "${PUBLIC_URL}" ]]; then
+    if [[ -n "${SESSION_RENAMER_TOKEN:-}" ]]; then
+      printf 'Public: %s/?token=<SESSION_RENAMER_TOKEN>\n' "${PUBLIC_URL%/}"
+    else
+      printf 'Public: %s\n' "${PUBLIC_URL}"
+    fi
+  else
+    printf 'Tunnel: %s:%s (VPS-internal, fronted by the HTTPS reverse proxy)\n' "${PUBLIC_HOST}" "${REMOTE_PORT}"
+  fi
 }
 
 cmd_stop() {
@@ -140,11 +151,23 @@ cmd_stop() {
 }
 
 cmd_status() {
+  local http_code
+  local probe_url
   validate_config
   printf 'Local service: '
   curl -sf -m 3 "http://127.0.0.1:${LOCAL_PORT}/health" >/dev/null 2>&1 && echo running || echo stopped
   printf 'Public health: '
-  curl -sf -m 5 "http://${PUBLIC_HOST}:${REMOTE_PORT}/health" >/dev/null 2>&1 && echo reachable || echo unreachable
+  if [[ -n "${PUBLIC_URL}" ]]; then
+    probe_url="${PUBLIC_URL%/}/health"
+  else
+    probe_url="http://${PUBLIC_HOST}:${REMOTE_PORT}/health"
+  fi
+  if http_code="$(curl --noproxy '*' -sS -m 10 -o /dev/null -w '%{http_code}' "${probe_url}" 2>/dev/null)" \
+    && [[ "${http_code}" != "000" ]]; then
+    echo "reachable (HTTP ${http_code})"
+  else
+    echo unreachable
+  fi
 }
 
 case "${1:-start}" in

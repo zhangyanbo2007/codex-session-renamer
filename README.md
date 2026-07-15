@@ -2,7 +2,7 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-> Current version: v0.6.2
+> Current version: v0.7.0
 
 A local web interface for reviewing, renaming, and cleaning up Codex sessions. The UI is Chinese and is designed for people who maintain many sessions across multiple project directories.
 
@@ -44,7 +44,8 @@ A local web interface for reviewing, renaming, and cleaning up Codex sessions. T
 - Does not send session content anywhere unless Qwen title generation is explicitly configured and triggered.
 - Caches recommendations and log metadata to avoid repeatedly parsing unchanged session files.
 - Loads full conversation details only for detail pages, content search, changed-session filtering, and title generation.
-- Requires an access token for every session-management page and action.
+- Supports an optional application access token for every session-management page and action.
+- Binds to loopback by default; tokenless mode is intended only for local use or an authenticated HTTPS reverse proxy.
 - Sends `Cache-Control: no-store` responses to reduce browser caching of private transcripts.
 
 ## Requirements
@@ -62,14 +63,26 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-Create a strong random token and start the local service:
+Start the loopback-only local service:
+
+```bash
+bash run.sh
+```
+
+Open:
+
+```text
+http://127.0.0.1:8891/
+```
+
+To add application-level authentication, create a strong random token before starting:
 
 ```bash
 export SESSION_RENAMER_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 bash run.sh
 ```
 
-Open:
+Then open:
 
 ```text
 http://127.0.0.1:8891/?token=<SESSION_RENAMER_TOKEN>
@@ -141,11 +154,12 @@ Copy `.env.example` as a reference, but export secrets into the process environm
 
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
-| `SESSION_RENAMER_TOKEN` | Yes | none | Access token for all private pages and actions |
+| `SESSION_RENAMER_TOKEN` | No | empty | Access token for all private pages and actions; when empty, application authentication is disabled |
 | `CODEX_HOME` | No | `~/.codex` | Codex data directory |
 | `SESSION_RENAMER_INDEX_PATH` | No | `$CODEX_HOME/session_index.jsonl` | Legacy index override |
 | `SESSION_RENAMER_HOST` | No | `127.0.0.1` | Local bind address |
 | `SESSION_RENAMER_PORT` | No | `8891` | Local HTTP port |
+| `SESSION_RENAMER_PUBLIC_URL` | No | empty | Public HTTPS URL shown by the FRP helper and used for its direct health check |
 | `SESSION_RENAMER_CODEX_BIN` | No | auto-detected | Codex executable with app-server support |
 | `SESSION_RENAMER_TITLE_PROVIDER` | No | `qwen` | Use `local` to keep existing titles without recommendations |
 | `SESSION_RENAMER_DASHSCOPE_API_KEY` | For Qwen | none | DashScope API key |
@@ -166,11 +180,15 @@ Required FRP values:
 ```bash
 export SESSION_RENAMER_FRP_CONFIG=/path/to/frpc.toml
 export SESSION_RENAMER_PUBLIC_HOST=example.com
-export SESSION_RENAMER_TOKEN='use-a-long-random-value'
 bash frp-tunnel.sh start
 ```
 
-Additional variables include `SESSION_RENAMER_FRP_BIN`, `SESSION_RENAMER_FRP_ADMIN`, `SESSION_RENAMER_FRP_PROXY_NAME`, `SESSION_RENAMER_REMOTE_PORT`, `SESSION_RENAMER_FRP_MANAGE_CONFIG`, `SESSION_RENAMER_LOG_FILE`, and `SESSION_RENAMER_PID_FILE`.
+Choose one authentication boundary before exposing the tunnel:
+
+- Set `SESSION_RENAMER_TOKEN` to keep application-level token authentication enabled.
+- Or place an authenticated HTTPS reverse proxy in front of the VPS-internal FRP port, leave `SESSION_RENAMER_TOKEN` unset, and set `SESSION_RENAMER_PUBLIC_URL` to the public HTTPS URL.
+
+Additional variables include `SESSION_RENAMER_PUBLIC_URL`, `SESSION_RENAMER_FRP_BIN`, `SESSION_RENAMER_FRP_ADMIN`, `SESSION_RENAMER_FRP_PROXY_NAME`, `SESSION_RENAMER_REMOTE_PORT`, `SESSION_RENAMER_FRP_MANAGE_CONFIG`, `SESSION_RENAMER_LOG_FILE`, and `SESSION_RENAMER_PID_FILE`.
 
 Validate configuration without starting anything:
 
@@ -186,13 +204,16 @@ bash frp-tunnel.sh status
 bash frp-tunnel.sh stop
 ```
 
-> FRP TCP forwarding does not add TLS. Codex transcripts can contain source code, credentials, personal information, and system context. Prefer a trusted private network. For public access, place TLS and stronger authentication in front of this service. Never expose it without a strong token.
+When `SESSION_RENAMER_PUBLIC_URL` is configured, `status` checks it directly without the local outbound proxy. An HTTP response proves the transport path is reachable; this includes the expected `401` from an authenticated reverse proxy.
+
+> FRP TCP forwarding does not add TLS or authentication. Codex transcripts can contain source code, credentials, personal information, and system context. Prefer a trusted private network. Never expose tokenless mode directly to the internet: the reverse proxy must enforce authentication on every management route.
 
 ## Safety notes
 
 - Back up `~/.codex` before first use.
 - Review recommendations before bulk rename.
 - Deletion changes Codex indexes and moves logs into a local trash directory; verify the selected directory and search filters first.
+- Tokenless mode disables application authentication. Keep the default loopback bind unless every public management route is protected by an authenticated HTTPS reverse proxy.
 - A token in a query string may appear in browser history and intermediary logs. Use a private network and rotate the token if it may have been exposed.
 - Model-based recommendations send cleaned conversation context to the configured provider only after the recommendation action is triggered.
 

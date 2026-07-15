@@ -22,7 +22,7 @@
         </div>
         <div class="topbar-actions">
           <form class="directory-filter" method="get" action="/">
-            <input type="hidden" name="token" value="{{ token }}">
+            {% if token %}<input type="hidden" name="token" value="{{ token }}">{% endif %}
             {% if selected_needs_rename %}
             <input type="hidden" name="needs_rename" value="1">
             {% endif %}
@@ -43,7 +43,7 @@
           </form>
           <div class="bulk-actions">
             <form method="get" action="/">
-              <input type="hidden" name="token" value="{{ token }}">
+              {% if token %}<input type="hidden" name="token" value="{{ token }}">{% endif %}
               {% if selected_directory %}
               <input type="hidden" name="directory" value="{{ selected_directory }}">
               {% endif %}
@@ -61,7 +61,7 @@
               </button>
             </form>
             <form method="get" action="/">
-              <input type="hidden" name="token" value="{{ token }}">
+              {% if token %}<input type="hidden" name="token" value="{{ token }}">{% endif %}
               {% if selected_directory %}
               <input type="hidden" name="directory" value="{{ selected_directory }}">
               {% endif %}
@@ -78,10 +78,10 @@
                 {% if selected_changed %}释放会话变化{% else %}只看会话变化{% endif %}
               </button>
             </form>
-            <form method="post" action="/recommend-all?{{ list_query }}">
+            <form method="post" action="/recommend-all{% if list_query %}?{{ list_query }}{% endif %}">
               <button class="secondary" type="submit">一键标题推荐</button>
             </form>
-            <form method="post" action="/auto-rename-all?{{ list_query }}">
+            <form method="post" action="/auto-rename-all{% if list_query %}?{{ list_query }}{% endif %}">
               <button type="submit">一键全部改名</button>
             </form>
           </div>
@@ -105,7 +105,7 @@
             <article class="session-row{% if row.needs_model_rename %} needs-model-rename{% endif %}">
               <div class="session-main">
                 <div class="session-title-row">
-                  <a class="session-title" href="/sessions/{{ session.id }}?token={{ token }}">{{ row.display_thread_name }}</a>
+                  <a class="session-title" href="/sessions/{{ session.id }}{% if token %}?token={{ token }}{% endif %}">{{ row.display_thread_name }}</a>
                   {% if row.needs_model_rename %}
                   <span class="status-badge needs-rename">未改名</span>
                   {% endif %}
@@ -130,14 +130,14 @@
                   <strong>{{ row.suggested_title }}</strong>
                 </div>
                 <div class="row-actions">
-                  <form class="single-recommend" method="post" action="/sessions/{{ session.id }}/recommend?{{ list_query }}&next=list">
+                  <form class="single-recommend" method="post" action="/sessions/{{ session.id }}/recommend?{% if list_query %}{{ list_query }}&{% endif %}next=list">
                     <button class="secondary" type="submit">单会话标题推荐</button>
                   </form>
-                  <form class="inline-rename" method="post" action="/sessions/{{ session.id }}/rename?{{ list_query }}&next=list">
+                  <form class="inline-rename" method="post" action="/sessions/{{ session.id }}/rename?{% if list_query %}{{ list_query }}&{% endif %}next=list">
                     <input name="thread_name" value="{{ row.rename_value }}" maxlength="120" aria-label="新会话名">
                     <button class="secondary" type="submit">单会话改名</button>
                   </form>
-                  <form class="delete-form inline-delete" method="post" action="/sessions/{{ session.id }}/delete?{{ list_query }}" onsubmit="return confirm('确认删除这个会话？日志会移入 trash，索引会备份。')">
+                  <form class="delete-form inline-delete" method="post" action="/sessions/{{ session.id }}/delete{% if list_query %}?{{ list_query }}{% endif %}" onsubmit="return confirm('确认删除这个会话？日志会移入 trash，索引会备份。')">
                     <button class="danger" type="submit">删除会话</button>
                   </form>
                 </div>

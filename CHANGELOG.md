@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## v0.7.0 - 2026-07-14
+
+### Authentication and deployment
+
+- Make the application token optional for loopback-only use and deployments protected by an authenticated HTTPS reverse proxy.
+- Omit empty token parameters from list, detail, action, and redirect URLs.
+- Add `SESSION_RENAMER_PUBLIC_URL` for public URL display and direct public health checks.
+- Treat HTTP responses such as an expected reverse-proxy `401` as proof that the public transport path is reachable.
+- Keep token placeholders in launcher output without printing the configured secret.
+
+### Documentation and tests
+
+- Document the required authentication boundary for tokenless mode in English and Chinese.
+- Add regression coverage for tokenless pages, clean action URLs, protected public health checks, and secret-safe launcher output.
+
 ## v0.6.2 - 2026-07-13
 
 ### Sparse sessions

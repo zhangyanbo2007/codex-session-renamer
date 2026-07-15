@@ -17,7 +17,7 @@ from starlette.requests import Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from session_renamer.app import create_app, _merge_existing_summary
+from session_renamer.app import create_app, _list_url, _merge_existing_summary
 from session_renamer.store import SessionStore
 
 
@@ -252,6 +252,62 @@ class AppTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 401)
 
+    def test_empty_list_url_has_no_trailing_query(self):
+        self.assertEqual(_list_url(""), "/")
+
+    def test_no_token_mode_serves_list_page_without_token(self):
+        store = SessionStore(self.index_path, self.codex_home)
+        self.app = create_app(
+            store=store,
+            access_token="",
+            title_generator=FixtureTitleGenerator(),
+        )
+        response = self.call_endpoint("/", method="GET", token=None)
+        text = self.response_text(response, query_string=b"")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("abc123", text)
+        self.assertNotIn("token=", text)
+
+    def test_no_token_mode_renders_clean_action_urls(self):
+        store = SessionStore(self.index_path, self.codex_home)
+        self.app = create_app(
+            store=store,
+            access_token="",
+            title_generator=FixtureTitleGenerator(),
+        )
+        response = self.call_endpoint("/", method="GET", token=None)
+        text = html.unescape(self.response_text(response, query_string=b""))
+
+        self.assertIn('action="/recommend-all"', text)
+        self.assertIn('action="/auto-rename-all"', text)
+        self.assertIn('action="/sessions/abc123/recommend?next=list"', text)
+        self.assertIn('action="/sessions/abc123/rename?next=list"', text)
+        self.assertIn('action="/sessions/abc123/delete"', text)
+        self.assertNotIn('?&', text)
+
+    def test_no_token_mode_allows_actions_and_redirects_without_token(self):
+        store = SessionStore(self.index_path, self.codex_home)
+        self.app = create_app(
+            store=store,
+            access_token="",
+            title_generator=FixtureTitleGenerator(),
+        )
+        response = self.call_endpoint(
+            "/sessions/{session_id}/rename",
+            method="POST",
+            token=None,
+            query_string="next=list",
+            body=urlencode({"thread_name": "无 Token 新标题"}),
+            headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+            session_id="abc123",
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/?status=renamed")
+        self.assertNotIn("token=", response.headers["location"])
+        self.assertIn("无 Token 新标题", self.index_path.read_text(encoding="utf-8"))
+
     def test_list_page_renders_with_token(self):
         response = self.call_endpoint("/", method="GET")
         text = self.response_text(response)
@@ -265,7 +321,7 @@ class AppTest(unittest.TestCase):
         self.assertIn("一键全部改名", text)
         self.assertIn("一键标题推荐", text)
         self.assertIn("删除会话", text)
-        self.assertIn("v0.6.2", text)
+        self.assertIn("v0.7.0", text)
 
     def test_list_page_marks_sessions_not_using_model_title(self):
         response = self.call_endpoint("/", method="GET")
