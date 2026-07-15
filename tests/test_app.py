@@ -6,6 +6,7 @@ import unittest
 import warnings
 import asyncio
 import inspect
+import multiprocessing
 import sqlite3
 from pathlib import Path
 from urllib.parse import urlencode
@@ -49,6 +50,17 @@ class CountingTitleGenerator:
 class FailingTitleGenerator:
     def suggest(self, messages, fallback):
         raise AssertionError("title generator should not be called")
+
+
+def write_distinct_cache_keys(cache_path, prefix, start_event):
+    from session_renamer.app import _update_title_cache
+
+    start_event.wait()
+    for index in range(30):
+        _update_title_cache(
+            Path(cache_path),
+            {f"{prefix}:{index}": f"value-{index}"},
+        )
 
 
 class AppTest(unittest.TestCase):
@@ -847,6 +859,39 @@ class AppTest(unittest.TestCase):
             "manual",
         )
 
+    def test_passive_list_and_detail_preserve_manual_drift_before_form_apply(self):
+        generator = CountingTitleGenerator("模型总览｜模型近况")
+        self.app.state.title_generator = generator
+        self.call_endpoint("/sessions/{session_id}/auto-rename", session_id="abc123")
+        self.assertEqual(generator.calls, 1)
+        self.replace_thread_name("abc123", "alpha｜外部人工总览任务｜外部近况")
+
+        list_response = self.call_endpoint("/", method="GET")
+        list_text = self.response_text(list_response)
+        detail_response = self.call_endpoint(
+            "/sessions/{session_id}", method="GET", session_id="abc123"
+        )
+        detail_text = self.response_text(detail_response, path="/sessions/abc123")
+        preserved = "alpha｜外部人工总览任务｜模型近况"
+
+        self.assertIn(f'name="thread_name" value="{preserved}"', list_text)
+        self.assertIn(f'name="thread_name" value="{preserved}"', detail_text)
+        self.assertEqual(generator.calls, 1)
+
+        self.call_endpoint(
+            "/sessions/{session_id}/rename",
+            body=urlencode({"thread_name": preserved}),
+            headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+            session_id="abc123",
+        )
+        cache = self.read_title_cache()
+        self.assertEqual(cache["overall-owner:abc123"], "manual")
+        self.assertEqual(cache["applied-title:abc123"], preserved)
+        self.assertIn(
+            f'"thread_name":"{preserved}"',
+            self.index_path.read_text(encoding="utf-8"),
+        )
+
     def test_external_short_title_drift_is_still_manual_owned(self):
         self.app.state.title_generator = FixedTitleGenerator("模型总览｜模型近况")
         self.call_endpoint("/sessions/{session_id}/auto-rename", session_id="abc123")
@@ -1092,6 +1137,90 @@ class AppTest(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 400)
         self.assert_no_applied_provenance("abc123", "def456")
 
+    def test_generator_exception_fails_closed_for_suggest_api(self):
+        self.app.state.title_generator = FailingTitleGenerator()
+
+        response = self.call_endpoint(
+            "/api/sessions/{session_id}/suggest",
+            method="GET",
+            session_id="abc123",
+        )
+
+        self.assertEqual(
+            json.loads(response.body.decode("utf-8"))["suggested_title"],
+            "暂无推荐",
+        )
+        self.assertEqual(self.title_cache_or_empty(), {})
+
+    def test_generator_exception_fails_closed_for_single_recommend(self):
+        self.app.state.title_generator = FailingTitleGenerator()
+
+        response = self.call_endpoint(
+            "/sessions/{session_id}/recommend",
+            session_id="abc123",
+        )
+
+        self.assertIn("status=no_recommendation", response.headers["location"])
+        self.assertEqual(self.title_cache_or_empty(), {})
+
+    def test_generator_exception_fails_closed_for_bulk_recommend(self):
+        self.app.state.title_generator = FailingTitleGenerator()
+
+        response = self.call_endpoint("/recommend-all")
+
+        self.assertIn("status=no_recommendation", response.headers["location"])
+        self.assertEqual(self.title_cache_or_empty(), {})
+
+    def test_generator_exception_fails_closed_for_single_auto(self):
+        self.app.state.title_generator = FailingTitleGenerator()
+
+        response = self.call_endpoint(
+            "/sessions/{session_id}/auto-rename",
+            session_id="abc123",
+        )
+
+        self.assertIn("status=no_recommendation", response.headers["location"])
+        self.assertIn('"thread_name": "旧标题"', self.index_path.read_text())
+        self.assertEqual(self.title_cache_or_empty(), {})
+
+    def test_generator_exception_fails_closed_for_bulk_auto(self):
+        self.app.state.title_generator = FailingTitleGenerator()
+
+        response = self.call_endpoint("/auto-rename-all")
+
+        self.assertIn("status=no_recommendation", response.headers["location"])
+        index_text = self.index_path.read_text()
+        self.assertIn('"thread_name": "旧标题"', index_text)
+        self.assertIn('"thread_name": "第二个旧标题"', index_text)
+        self.assertEqual(self.title_cache_or_empty(), {})
+
+    def test_multiprocess_cache_updates_retain_all_distinct_keys(self):
+        cache_path = self.codex_home / "concurrent-title-cache.json"
+        context = multiprocessing.get_context("fork")
+        start_event = context.Event()
+        processes = [
+            context.Process(
+                target=write_distinct_cache_keys,
+                args=(str(cache_path), f"worker-{index}", start_event),
+            )
+            for index in range(4)
+        ]
+        for process in processes:
+            process.start()
+        start_event.set()
+        for process in processes:
+            process.join(10)
+
+        self.assertEqual([process.exitcode for process in processes], [0, 0, 0, 0])
+        cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(cache), 120)
+        for worker in range(4):
+            for index in range(30):
+                self.assertEqual(
+                    cache[f"worker-{worker}:{index}"],
+                    f"value-{index}",
+                )
+
     def test_single_and_bulk_auto_rename_store_model_ownership(self):
         self.call_endpoint("/sessions/{session_id}/auto-rename", session_id="abc123")
         cache = self.read_title_cache()
@@ -1185,10 +1314,11 @@ class AppTest(unittest.TestCase):
 
     def test_index_page_does_not_generate_title_recommendations(self):
         store = SessionStore(self.index_path, self.codex_home)
+        generator = CountingTitleGenerator("不应调用｜不应生成")
         self.app = create_app(
             store=store,
             access_token="secret",
-            title_generator=FailingTitleGenerator(),
+            title_generator=generator,
         )
 
         response = self.call_endpoint("/", method="GET")
@@ -1196,6 +1326,7 @@ class AppTest(unittest.TestCase):
 
         self.assertNotIn("alpha｜Codex会话管理工具任务｜Codex会话管理工具", text)
         self.assertNotIn("beta｜这是一个测试任务｜这是一个测试", text)
+        self.assertEqual(generator.calls, 0)
 
     def test_rename_post_updates_index(self):
         response = self.call_endpoint(
@@ -1566,6 +1697,40 @@ class AppTest(unittest.TestCase):
         index_text = self.index_path.read_text(encoding="utf-8")
         self.assertNotIn("abc123", index_text)
         self.assertIn("def456", index_text)
+
+    def test_delete_post_removes_only_session_scoped_title_cache_keys(self):
+        cache_path = self.codex_home / "session-renamer-title-cache.json"
+        cache_path.write_text(
+            json.dumps(
+                {
+                    "session:abc123": "旧推荐任务｜旧近况",
+                    "pending-recommendation:abc123": "hash-abc",
+                    "prefill-recommendation:abc123": "hash-abc",
+                    "applied-content:abc123": "hash-abc",
+                    "applied-title:abc123": "alpha｜旧推荐任务｜旧近况",
+                    "overall-owner:abc123": "model",
+                    "recommendation-owner:hash-abc": "model",
+                    "unrelated:key": "keep",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        self.call_endpoint("/sessions/{session_id}/delete", session_id="abc123")
+
+        cache = self.read_title_cache()
+        for prefix in (
+            "session",
+            "pending-recommendation",
+            "prefill-recommendation",
+            "applied-content",
+            "applied-title",
+            "overall-owner",
+        ):
+            self.assertNotIn(f"{prefix}:abc123", cache)
+        self.assertEqual(cache["recommendation-owner:hash-abc"], "model")
+        self.assertEqual(cache["unrelated:key"], "keep")
 
     def test_delete_post_preserves_directory_filter_in_redirect(self):
         response = self.call_endpoint(

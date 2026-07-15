@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -94,10 +96,7 @@ def create_app(
                 continue
             # 首页刷新只读取已有推荐缓存，不主动触发 Qwen。
             # AI 推荐只在用户点击“一键标题推荐”时生成。
-            suggested_title = (
-                cached_title_for(detail, title_cache)
-                or _sanitize_title(session.thread_name)
-            )
+            suggested_title = passive_title_for(detail, title_cache)
             can_use_suggestion = _is_actionable_title(suggested_title)
             rows.append(
                 {
@@ -174,13 +173,14 @@ def create_app(
                     suggested_title,
                     recommendation_owner_for(detail),
                 )
-        try:
-            app.state.store.rename_sessions(titles_by_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="session not found") from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        mark_content_applied(applied_recommendations.values())
+        if titles_by_id:
+            try:
+                app.state.store.rename_sessions(titles_by_id)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="session not found") from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            mark_content_applied(applied_recommendations.values())
         return RedirectResponse(
             url=_list_url(
                 current_token,
@@ -188,7 +188,7 @@ def create_app(
                 search_query,
                 needs_rename=selected_needs_rename,
                 changed=selected_changed,
-                status="renamed_all",
+                status="renamed_all" if titles_by_id else "no_recommendation",
             ),
             status_code=303,
         )
@@ -202,8 +202,10 @@ def create_app(
             raise HTTPException(status_code=404, detail="session not found") from exc
         title_cache = refresh_title_cache_from_disk()
         conversation_changed = _conversation_changed(detail, title_cache)
-        suggested_title_for(detail, refresh=True)
-        mark_single_recommendation(detail, conversation_changed)
+        suggested_title = suggested_title_for(detail, refresh=True)
+        has_recommendation = _is_actionable_title(suggested_title)
+        if has_recommendation:
+            mark_single_recommendation(detail, conversation_changed)
         if request.query_params.get("next") == "list":
             return RedirectResponse(
                 url=_list_url(
@@ -214,12 +216,16 @@ def create_app(
                         request.query_params.get("needs_rename", "")
                     ),
                     changed=_selected_changed(request.query_params.get("changed", "")),
-                    status="recommended",
+                    status="recommended" if has_recommendation else "no_recommendation",
                 ),
                 status_code=303,
             )
         return RedirectResponse(
-            url=_session_url(session_id, current_token, status="recommended"),
+            url=_session_url(
+                session_id,
+                current_token,
+                status="recommended" if has_recommendation else "no_recommendation",
+            ),
             status_code=303,
         )
 
@@ -255,19 +261,21 @@ def create_app(
                 len(recommendation_jobs) or 1,
             ),
         )
+        recommended_details = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
+            futures = {
                 executor.submit(
                     suggested_title_for,
                     detail,
                     refresh=True,
-                )
+                ): detail
                 for detail in recommendation_jobs
-            ]
+            }
             for future in as_completed(futures):
-                future.result()
+                if _is_actionable_title(future.result()):
+                    recommended_details.append(futures[future])
 
-        for detail in recommendation_jobs:
+        for detail in recommended_details:
             if recommendation_owner_for(detail) == "manual":
                 mark_recommendation_pending(detail)
         return RedirectResponse(
@@ -277,7 +285,9 @@ def create_app(
                 search_query,
                 needs_rename=selected_needs_rename,
                 changed=selected_changed,
-                status="recommended",
+                status=(
+                    "recommended" if recommended_details else "no_recommendation"
+                ),
             ),
             status_code=303,
         )
@@ -340,18 +350,14 @@ def create_app(
         try:
             detail = app.state.store.get_session(session_id)
             title_cache = refresh_title_cache_from_disk()
-            recommended_title = cached_title_for(detail, title_cache)
+            recommended_title = passive_title_for(detail, title_cache)
             owner = "manual"
             if (
                 recommended_title
                 and _canonical_full_title(new_title, detail.cwd)
                 == _canonical_full_title(recommended_title, detail.cwd)
             ):
-                recommendation_owner = title_cache.get(
-                    f"recommendation-owner:{_title_cache_key(detail)}"
-                )
-                if recommendation_owner in {"model", "manual"}:
-                    owner = recommendation_owner
+                owner = recommendation_owner_for(detail)
             app.state.store.rename_session(session_id, new_title)
             mark_content_applied([(detail, new_title, owner)])
         except KeyError as exc:
@@ -389,7 +395,8 @@ def create_app(
                 detail,
                 refresh=conversation_changed,
             )
-            if _is_actionable_title(suggested_title):
+            renamed = _is_actionable_title(suggested_title)
+            if renamed:
                 app.state.store.rename_session(session_id, suggested_title)
                 mark_content_applied(
                     [(detail, suggested_title, recommendation_owner_for(detail))]
@@ -399,7 +406,11 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse(
-            url=_session_url(session_id, current_token, status="renamed"),
+            url=_session_url(
+                session_id,
+                current_token,
+                status="renamed" if renamed else "no_recommendation",
+            ),
             status_code=303,
         )
 
@@ -410,6 +421,7 @@ def create_app(
             app.state.store.delete_session(session_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
+        remove_session_cache_keys(session_id)
         return RedirectResponse(
             url=_list_url(
                 current_token,
@@ -466,6 +478,15 @@ def create_app(
             app.state.title_cache = _load_title_cache(app.state.title_cache_path)
             return dict(app.state.title_cache)
 
+    def update_title_cache(updates: dict[str, str] | None = None, removals=()):
+        with app.state.title_cache_lock:
+            app.state.title_cache = _update_title_cache(
+                app.state.title_cache_path,
+                updates,
+                removals,
+            )
+            return dict(app.state.title_cache)
+
     def cached_title_for(detail, title_cache: dict[str, str]) -> str | None:
         cached = title_cache.get(f"session:{detail.id}")
         if not cached:
@@ -505,17 +526,21 @@ def create_app(
                     detail.cwd,
                 )
             if persist:
-                with app.state.title_cache_lock:
-                    app.state.title_cache[cache_key] = cached
-                    app.state.title_cache[f"session:{detail.id}"] = cached
-                    app.state.title_cache[f"recommendation-owner:{cache_key}"] = owner
-                    _save_title_cache(app.state.title_cache_path, app.state.title_cache)
+                update_title_cache(
+                    {
+                        cache_key: cached,
+                        f"session:{detail.id}": cached,
+                        f"recommendation-owner:{cache_key}": owner,
+                    }
+                )
             return _title_with_directory_prefix(detail.cwd, cached)
         try:
             raw_title = app.state.title_generator.suggest(detail.messages, detail.thread_name)
         except Exception:
-            raw_title = detail.thread_name
+            return NO_RECOMMENDATION_TITLE
         title = _content_title_for_directory(raw_title, detail.cwd)
+        if not _is_actionable_title(title):
+            return NO_RECOMMENDATION_TITLE
         if owner == "manual":
             title = _content_title_for_directory(
                 _merge_existing_summary(
@@ -525,22 +550,29 @@ def create_app(
                 ),
                 detail.cwd,
             )
+        if not _is_actionable_title(title):
+            return NO_RECOMMENDATION_TITLE
         if persist:
-            with app.state.title_cache_lock:
-                app.state.title_cache[cache_key] = title
-                app.state.title_cache[f"session:{detail.id}"] = title
-                app.state.title_cache[f"recommendation-owner:{cache_key}"] = owner
-                _save_title_cache(app.state.title_cache_path, app.state.title_cache)
+            update_title_cache(
+                {
+                    cache_key: title,
+                    f"session:{detail.id}": title,
+                    f"recommendation-owner:{cache_key}": owner,
+                }
+            )
         return _title_with_directory_prefix(detail.cwd, title)
 
     def recommendation_owner_for(detail) -> str:
         with app.state.title_cache_lock:
+            resolved_owner = _overall_owner_for(detail, app.state.title_cache)
+            if resolved_owner == "manual":
+                return "manual"
             owner = app.state.title_cache.get(
                 f"recommendation-owner:{_title_cache_key(detail)}"
             )
             if owner in {"model", "manual"}:
                 return owner
-            return _overall_owner_for(detail, app.state.title_cache)
+            return resolved_owner
 
     def suggested_titles_for(details) -> dict[str, str]:
         if not details:
@@ -565,42 +597,51 @@ def create_app(
         return titles
 
     def mark_recommendation_pending(detail) -> None:
-        with app.state.title_cache_lock:
-            app.state.title_cache[f"pending-recommendation:{detail.id}"] = (
-                _title_cache_key(detail)
-            )
-            _save_title_cache(app.state.title_cache_path, app.state.title_cache)
+        update_title_cache(
+            {
+                f"pending-recommendation:{detail.id}": _title_cache_key(detail),
+            }
+        )
 
     def mark_single_recommendation(detail, conversation_changed: bool) -> None:
-        with app.state.title_cache_lock:
-            cache_key = _title_cache_key(detail)
-            app.state.title_cache[f"prefill-recommendation:{detail.id}"] = cache_key
-            if conversation_changed:
-                app.state.title_cache[f"pending-recommendation:{detail.id}"] = cache_key
-            _save_title_cache(app.state.title_cache_path, app.state.title_cache)
+        cache_key = _title_cache_key(detail)
+        updates = {f"prefill-recommendation:{detail.id}": cache_key}
+        if conversation_changed:
+            updates[f"pending-recommendation:{detail.id}"] = cache_key
+        update_title_cache(updates)
 
     def mark_content_applied(applied_recommendations) -> None:
         applied_recommendations = list(applied_recommendations)
         if not applied_recommendations:
             return
-        with app.state.title_cache_lock:
-            for detail, applied_title, owner in applied_recommendations:
-                app.state.title_cache[f"applied-content:{detail.id}"] = (
-                    _title_cache_key(detail)
-                )
-                app.state.title_cache[f"applied-title:{detail.id}"] = (
-                    _canonical_full_title(applied_title, detail.cwd)
-                )
-                app.state.title_cache[f"overall-owner:{detail.id}"] = owner
-                app.state.title_cache.pop(
+        updates = {}
+        removals = []
+        for detail, applied_title, owner in applied_recommendations:
+            updates[f"applied-content:{detail.id}"] = _title_cache_key(detail)
+            updates[f"applied-title:{detail.id}"] = _canonical_full_title(
+                applied_title,
+                detail.cwd,
+            )
+            updates[f"overall-owner:{detail.id}"] = owner
+            removals.extend(
+                [
                     f"pending-recommendation:{detail.id}",
-                    None,
-                )
-                app.state.title_cache.pop(
                     f"prefill-recommendation:{detail.id}",
-                    None,
-                )
-            _save_title_cache(app.state.title_cache_path, app.state.title_cache)
+                ]
+            )
+        update_title_cache(updates, removals)
+
+    def remove_session_cache_keys(session_id: str) -> None:
+        update_title_cache(
+            removals=[
+                f"session:{session_id}",
+                f"pending-recommendation:{session_id}",
+                f"prefill-recommendation:{session_id}",
+                f"applied-content:{session_id}",
+                f"applied-title:{session_id}",
+                f"overall-owner:{session_id}",
+            ]
+        )
 
     return app
 
@@ -621,14 +662,42 @@ def _load_title_cache(path: Path) -> dict[str, str]:
     }
 
 
-def _save_title_cache(path: Path, cache: dict[str, str]) -> None:
+def _update_title_cache(
+    path: Path,
+    updates: dict[str, str] | None = None,
+    removals=(),
+) -> dict[str, str]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(
-        json.dumps(cache, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
-    )
-    os.replace(tmp_path, path)
+    lock_path = path.with_name(f"{path.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        cache = _load_title_cache(path)
+        for key in removals:
+            cache.pop(key, None)
+        cache.update(updates or {})
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp_file:
+                tmp_path = Path(tmp_file.name)
+                tmp_file.write(
+                    json.dumps(cache, ensure_ascii=False, separators=(",", ":"))
+                )
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+            os.replace(tmp_path, path)
+            tmp_path = None
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    return cache
 
 
 def _with_no_store(response: Response) -> Response:
@@ -917,6 +986,8 @@ def _session_search_text(session, detail) -> str:
 
 
 def _status_message(status: str) -> str:
+    if status == "no_recommendation":
+        return "暂无可用标题推荐"
     if status == "recommended":
         return "已完成一键标题推荐"
     if status == "renamed":
