@@ -177,13 +177,17 @@ def _parse_component(raw_title: str) -> str:
     return title
 
 
-_CARRIER_ONLY_TITLE = re.compile(
-    r"^(?:截图|图片|图像|附件|文件|代码|日志|路径|附件名|文件名|扩展名)"
-    r"(?:分析|查看|检查|处理|整理|评估|识别|解读|修复|排查|转换|迁移|上传|"
-    r"下载|读取|解析|编辑|修改|生成|删除|审查)?$"
+_CHINESE_CARRIER_TITLE = re.compile(
+    r"^(?:附件名|文件名|扩展名|截图|图片|图像|附件|文件|代码|日志|路径)"
+    r"[\u3400-\u9fff]*$"
 )
-_FILENAME = re.compile(
-    r"[\w-]+\.[a-z][a-z0-9]{0,7}",
+_ENGLISH_CARRIER_TITLE = re.compile(
+    r"^(?:screenshot|image|picture|attachment|file|code|log|path|filename|extension)"
+    r"[a-z]*$",
+    flags=re.I,
+)
+_DOTTED_NAME = re.compile(
+    r"(?<![a-z0-9_-])([a-z0-9_-]+)\.([a-z][a-z0-9]{0,7})",
     flags=re.I,
 )
 
@@ -196,11 +200,27 @@ def _overall_title_failure(title: str) -> str:
     task_object = re.sub(r"\s+", "", title[: -len("任务")])
     if not task_object:
         return "候选标题缺少具体任务对象"
-    if "/" in task_object or "\\" in task_object or _FILENAME.search(task_object):
+    if "/" in task_object or "\\" in task_object or _has_filename_shape(task_object):
         return "候选标题由路径、附件名、文件名或扩展名主导"
-    if _CARRIER_ONLY_TITLE.fullmatch(task_object):
+    if _is_carrier_dominated(task_object):
         return "候选标题只有通用输入载体和通用动作"
     return ""
+
+
+def _has_filename_shape(task_object: str) -> bool:
+    for match in _DOTTED_NAME.finditer(task_object):
+        basename = match.group(1)
+        letters = "".join(character for character in basename if character.isalpha())
+        if not letters or letters.islower() or letters.isupper():
+            return True
+    return False
+
+
+def _is_carrier_dominated(task_object: str) -> bool:
+    return bool(
+        _CHINESE_CARRIER_TITLE.fullmatch(task_object)
+        or _ENGLISH_CARRIER_TITLE.fullmatch(task_object)
+    )
 
 
 def _env_value(*names: str) -> str:

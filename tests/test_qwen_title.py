@@ -210,6 +210,9 @@ class QwenTitleTest(unittest.TestCase):
             "任务",
             "截图任务",
             "图片转换任务",
+            "截图校验任务",
+            "日志诊断任务",
+            "文件格式兼容性校验任务",
             "schema.sql迁移任务",
             "/tmp/schema.sql迁移任务",
             r"C:\logs\schema.sql迁移任务",
@@ -219,10 +222,15 @@ class QwenTitleTest(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertTrue(qwen_title._overall_title_failure(title))
 
-        self.assertEqual(
-            qwen_title._overall_title_failure("应急评测泛化优化任务"),
-            "",
+        valid_titles = (
+            "应急评测泛化优化任务",
+            "Python代码质量检查任务",
+            "Node.js升级任务",
+            "Vue.js迁移任务",
         )
+        for title in valid_titles:
+            with self.subTest(title=title):
+                self.assertEqual(qwen_title._overall_title_failure(title), "")
 
     def test_model_rewrites_path_bearing_recent_draft(self):
         opener = FakeOpener(
