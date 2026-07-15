@@ -186,26 +186,28 @@ def _overall_title_failure(title: str) -> str:
         return "候选标题为空"
     if not title.endswith("任务"):
         return "候选标题没有以任务结尾"
-    task_object = re.sub(r"\s+", "", title[: -len("任务")])
-    if not task_object:
+    task_object = title[: -len("任务")].strip()
+    if not re.sub(r"\s+", "", task_object):
         return "候选标题缺少具体任务对象"
     if _contains_unmistakable_path(task_object):
         return "候选标题包含明确文件路径"
     return ""
 
 
-_UNIX_ABSOLUTE_PATH = re.compile(
-    r"/(?:home|tmp|var|usr|etc|opt|root|data|mnt)(?:/|$)"
-)
+_SLASH_PATH_TOKEN = re.compile(r"(?:^|\s)/[^/\s]")
+_MULTI_SEGMENT_SLASH_PATH = re.compile(r"/[^/\s]+/[^/\s]+")
 _WINDOWS_DRIVE_PATH = re.compile(r"[A-Za-z]:[\\/]")
 _DOT_TRAVERSAL_PATH = re.compile(r"(?<!\.)\.\.?[\\/]")
+_UNC_PATH = re.compile(r"\\\\[^\\\s]+\\[^\\\s]+")
 
 
 def _contains_unmistakable_path(title: str) -> bool:
     return bool(
-        _UNIX_ABSOLUTE_PATH.search(title)
+        _SLASH_PATH_TOKEN.search(title)
+        or _MULTI_SEGMENT_SLASH_PATH.search(title)
         or _WINDOWS_DRIVE_PATH.search(title)
         or _DOT_TRAVERSAL_PATH.search(title)
+        or _UNC_PATH.search(title)
     )
 
 

@@ -279,7 +279,12 @@ class QwenTitleTest(unittest.TestCase):
             "任务",
             "Node.js升级",
             "/tmp/schema.sql迁移任务",
+            "/workspace/repo迁移任务",
+            "检查 /srv/app/config.yaml 配置任务",
+            "/Users/alice/report.pdf分析任务",
+            "迁移/workspace/repo任务",
             r"C:\logs\schema.sql迁移任务",
+            r"\\server\share\report.pdf分析任务",
             "./schema.sql迁移任务",
             "../schema.sql迁移任务",
         )
