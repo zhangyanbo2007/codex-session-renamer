@@ -428,6 +428,8 @@ class QwenTitleTest(unittest.TestCase):
             "TCP/IP/UDP协议对比任务",
             "客户端/服务器/数据库架构设计任务",
             "迁移/workspace/repo任务",
+            "C++/CLI互操作任务",
+            "C#/.NET互操作任务",
         )
         for title in valid_titles:
             with self.subTest(title=title):
