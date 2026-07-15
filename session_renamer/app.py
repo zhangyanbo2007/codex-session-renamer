@@ -153,7 +153,7 @@ def create_app(
             title_cache,
         ) = list_state_for_request(request)
         titles_by_id: dict[str, str] = {}
-        renamed_details = {}
+        applied_recommendations = {}
         for session in sessions:
             detail = details.get(session.id) or app.state.store.get_session(session.id)
             needs_model_rename = _needs_model_rename(session.thread_name, session.cwd)
@@ -166,18 +166,21 @@ def create_app(
             suggested_title = suggested_title_for(
                 detail,
                 refresh=conversation_changed,
-                preserve_existing_summary=conversation_changed and not needs_model_rename,
             )
             if _is_actionable_title(suggested_title):
                 titles_by_id[session.id] = suggested_title
-                renamed_details[session.id] = detail
+                applied_recommendations[session.id] = (
+                    detail,
+                    suggested_title,
+                    recommendation_owner_for(detail),
+                )
         try:
             app.state.store.rename_sessions(titles_by_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        mark_content_applied(renamed_details.values())
+        mark_content_applied(applied_recommendations.values())
         return RedirectResponse(
             url=_list_url(
                 current_token,
@@ -243,13 +246,7 @@ def create_app(
                 continue
             if selected_changed and not conversation_changed:
                 continue
-            recommendation_jobs.append(
-                (
-                    detail,
-                    conversation_changed,
-                    conversation_changed and not needs_model_rename,
-                )
-            )
+            recommendation_jobs.append(detail)
 
         max_workers = max(
             1,
@@ -264,15 +261,14 @@ def create_app(
                     suggested_title_for,
                     detail,
                     refresh=True,
-                    preserve_existing_summary=preserve_existing_summary,
                 )
-                for detail, _conversation_changed_flag, preserve_existing_summary in recommendation_jobs
+                for detail in recommendation_jobs
             ]
             for future in as_completed(futures):
                 future.result()
 
-        for detail, _conversation_changed_flag, preserve_existing_summary in recommendation_jobs:
-            if preserve_existing_summary:
+        for detail in recommendation_jobs:
+            if recommendation_owner_for(detail) == "manual":
                 mark_recommendation_pending(detail)
         return RedirectResponse(
             url=_list_url(
@@ -293,13 +289,10 @@ def create_app(
             detail = app.state.store.get_session(session_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
-        title_cache = refresh_title_cache_from_disk()
-        conversation_changed = _conversation_changed(detail, title_cache)
-        needs_model_rename = _needs_model_rename(detail.thread_name, detail.cwd)
+        refresh_title_cache_from_disk()
         suggested_title = suggested_title_for(
             detail,
             persist=False,
-            preserve_existing_summary=conversation_changed and not needs_model_rename,
         )
         can_use_suggestion = _is_actionable_title(suggested_title)
         response = TEMPLATES.TemplateResponse(
@@ -329,17 +322,13 @@ def create_app(
             detail = app.state.store.get_session(session_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
-        title_cache = refresh_title_cache_from_disk()
-        conversation_changed = _conversation_changed(detail, title_cache)
-        needs_model_rename = _needs_model_rename(detail.thread_name, detail.cwd)
+        refresh_title_cache_from_disk()
         return _with_no_store(
             JSONResponse(
                 {
                     "suggested_title": suggested_title_for(
                         detail,
                         persist=False,
-                        preserve_existing_summary=conversation_changed
-                        and not needs_model_rename,
                     )
                 }
             )
@@ -353,8 +342,17 @@ def create_app(
         new_title = values.get("thread_name", [""])[0]
         try:
             detail = app.state.store.get_session(session_id)
+            title_cache = refresh_title_cache_from_disk()
+            recommended_title = cached_title_for(detail, title_cache)
+            owner = "manual"
+            if recommended_title and new_title == recommended_title:
+                recommendation_owner = title_cache.get(
+                    f"recommendation-owner:{_title_cache_key(detail)}"
+                )
+                if recommendation_owner in {"model", "manual"}:
+                    owner = recommendation_owner
             app.state.store.rename_session(session_id, new_title)
-            mark_content_applied([detail])
+            mark_content_applied([(detail, new_title, owner)])
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
         except ValueError as exc:
@@ -386,15 +384,15 @@ def create_app(
             detail = app.state.store.get_session(session_id)
             title_cache = refresh_title_cache_from_disk()
             conversation_changed = _conversation_changed(detail, title_cache)
-            needs_model_rename = _needs_model_rename(detail.thread_name, detail.cwd)
             suggested_title = suggested_title_for(
                 detail,
                 refresh=conversation_changed,
-                preserve_existing_summary=conversation_changed and not needs_model_rename,
             )
             if _is_actionable_title(suggested_title):
                 app.state.store.rename_session(session_id, suggested_title)
-                mark_content_applied([detail])
+                mark_content_applied(
+                    [(detail, suggested_title, recommendation_owner_for(detail))]
+                )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
         except ValueError as exc:
@@ -480,28 +478,60 @@ def create_app(
         detail,
         refresh: bool = False,
         persist: bool = True,
-        preserve_existing_summary: bool = False,
     ) -> str:
         cache_key = _title_cache_key(detail)
         cached = None
-        if not refresh:
-            with app.state.title_cache_lock:
+        with app.state.title_cache_lock:
+            owner = _overall_owner_for(detail, app.state.title_cache)
+            if not refresh:
                 cached = app.state.title_cache.get(cache_key)
         if cached:
+            if owner == "manual":
+                cached = _content_title_for_directory(
+                    _merge_existing_summary(
+                        detail.thread_name,
+                        _title_with_directory_prefix(detail.cwd, cached),
+                        detail.cwd,
+                    ),
+                    detail.cwd,
+                )
+            if persist:
+                with app.state.title_cache_lock:
+                    app.state.title_cache[cache_key] = cached
+                    app.state.title_cache[f"session:{detail.id}"] = cached
+                    app.state.title_cache[f"recommendation-owner:{cache_key}"] = owner
+                    _save_title_cache(app.state.title_cache_path, app.state.title_cache)
             return _title_with_directory_prefix(detail.cwd, cached)
         try:
             raw_title = app.state.title_generator.suggest(detail.messages, detail.thread_name)
         except Exception:
             raw_title = detail.thread_name
         title = _content_title_for_directory(raw_title, detail.cwd)
-        if preserve_existing_summary:
-            title = _merge_existing_summary(detail.thread_name, title, detail.cwd)
+        if owner == "manual":
+            title = _content_title_for_directory(
+                _merge_existing_summary(
+                    detail.thread_name,
+                    _title_with_directory_prefix(detail.cwd, title),
+                    detail.cwd,
+                ),
+                detail.cwd,
+            )
         if persist:
             with app.state.title_cache_lock:
                 app.state.title_cache[cache_key] = title
                 app.state.title_cache[f"session:{detail.id}"] = title
+                app.state.title_cache[f"recommendation-owner:{cache_key}"] = owner
                 _save_title_cache(app.state.title_cache_path, app.state.title_cache)
         return _title_with_directory_prefix(detail.cwd, title)
+
+    def recommendation_owner_for(detail) -> str:
+        with app.state.title_cache_lock:
+            owner = app.state.title_cache.get(
+                f"recommendation-owner:{_title_cache_key(detail)}"
+            )
+            if owner in {"model", "manual"}:
+                return owner
+            return _overall_owner_for(detail, app.state.title_cache)
 
     def suggested_titles_for(details) -> dict[str, str]:
         if not details:
@@ -540,15 +570,19 @@ def create_app(
                 app.state.title_cache[f"pending-recommendation:{detail.id}"] = cache_key
             _save_title_cache(app.state.title_cache_path, app.state.title_cache)
 
-    def mark_content_applied(details) -> None:
-        details = list(details)
-        if not details:
+    def mark_content_applied(applied_recommendations) -> None:
+        applied_recommendations = list(applied_recommendations)
+        if not applied_recommendations:
             return
         with app.state.title_cache_lock:
-            for detail in details:
+            for detail, applied_title, owner in applied_recommendations:
                 app.state.title_cache[f"applied-content:{detail.id}"] = (
                     _title_cache_key(detail)
                 )
+                app.state.title_cache[f"applied-title:{detail.id}"] = (
+                    _canonical_full_title(applied_title, detail.cwd)
+                )
+                app.state.title_cache[f"overall-owner:{detail.id}"] = owner
                 app.state.title_cache.pop(
                     f"pending-recommendation:{detail.id}",
                     None,
@@ -604,6 +638,32 @@ def _title_cache_key(detail) -> str:
         getattr(detail, "messages", []),
         getattr(detail, "preview", ""),
     )
+
+
+def _canonical_full_title(title: str, cwd: str) -> str:
+    return _title_with_directory_prefix(cwd, title)
+
+
+def _overall_owner_for(detail, title_cache: dict[str, str]) -> str:
+    current_title = _canonical_full_title(detail.thread_name, detail.cwd)
+    applied_title = title_cache.get(f"applied-title:{detail.id}")
+    if applied_title is not None:
+        if current_title != _canonical_full_title(applied_title, detail.cwd):
+            return "manual"
+        owner = title_cache.get(f"overall-owner:{detail.id}")
+        return owner if owner in {"model", "manual"} else "manual"
+
+    if not _is_model_renamed_title(detail.thread_name, detail.cwd):
+        return "model"
+
+    legacy_recommendation = title_cache.get(f"session:{detail.id}")
+    if (
+        legacy_recommendation
+        and current_title
+        == _canonical_full_title(legacy_recommendation, detail.cwd)
+    ):
+        return "model"
+    return "manual"
 
 
 def _sanitize_title(title: str) -> str:

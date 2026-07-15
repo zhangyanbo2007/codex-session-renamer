@@ -246,6 +246,40 @@ class AppTest(unittest.TestCase):
         )
         return body.decode("utf-8")
 
+    def read_title_cache(self):
+        return json.loads(
+            (self.codex_home / "session-renamer-title-cache.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def replace_thread_name(self, session_id, thread_name):
+        records = []
+        for line in self.index_path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if record["id"] == session_id:
+                record["thread_name"] = thread_name
+            records.append(json.dumps(record, ensure_ascii=False))
+        self.index_path.write_text("\n".join(records) + "\n", encoding="utf-8")
+
+    def append_user_message(self, session_id, text):
+        log_path = next((self.codex_home / "sessions").rglob(f"*{session_id}.jsonl"))
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-08T03:00:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": text}],
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
     def test_requires_token_for_list_page(self):
         with self.assertRaises(HTTPException) as raised:
             self.call_endpoint("/", method="GET", token=None)
@@ -715,6 +749,245 @@ class AppTest(unittest.TestCase):
                 "/work/alpha",
             ),
             "alpha｜新总览｜新近况",
+        )
+
+    def test_changed_model_owned_title_can_evolve_overall_and_recent_segments(self):
+        generator = CountingTitleGenerator("第一版总览｜第一版近况")
+        self.app = create_app(
+            store=SessionStore(self.index_path, self.codex_home),
+            access_token="secret",
+            title_generator=generator,
+        )
+        self.call_endpoint("/sessions/{session_id}/auto-rename", session_id="abc123")
+        self.append_user_message("abc123", "新增：任务方向已经改变")
+        generator.title = "第二版总览｜第二版近况"
+
+        self.call_endpoint("/sessions/{session_id}/recommend", session_id="abc123")
+
+        detail = self.app.state.store.get_session("abc123")
+        cache = self.read_title_cache()
+        self.assertEqual(
+            cache[f"session:{detail.id}"],
+            "第二版总览任务｜第二版近况",
+        )
+        self.assertEqual(
+            cache[f"recommendation-owner:{detail.content_cache_key}"],
+            "model",
+        )
+
+    def test_changed_manual_owned_title_preserves_overall_segment(self):
+        self.call_endpoint(
+            "/sessions/{session_id}/rename",
+            body=urlencode({"thread_name": "alpha｜人工总览任务｜人工近况"}),
+            headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+            session_id="abc123",
+        )
+        self.append_user_message("abc123", "新增：只更新最近状态")
+        self.app.state.title_generator = FixedTitleGenerator("模型新总览｜模型新近况")
+
+        self.call_endpoint("/sessions/{session_id}/recommend", session_id="abc123")
+
+        detail = self.app.state.store.get_session("abc123")
+        cache = self.read_title_cache()
+        self.assertEqual(
+            cache[f"session:{detail.id}"],
+            "人工总览任务｜模型新近况",
+        )
+        self.assertEqual(
+            cache[f"recommendation-owner:{detail.content_cache_key}"],
+            "manual",
+        )
+
+    def test_unchanged_manual_owned_title_preserves_overall_segment(self):
+        self.call_endpoint(
+            "/sessions/{session_id}/rename",
+            body=urlencode({"thread_name": "alpha｜人工总览任务｜人工近况"}),
+            headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+            session_id="abc123",
+        )
+        self.app.state.title_generator = FixedTitleGenerator("模型新总览｜模型新近况")
+
+        self.call_endpoint("/sessions/{session_id}/recommend", session_id="abc123")
+
+        cache = self.read_title_cache()
+        self.assertEqual(
+            cache["session:abc123"],
+            "人工总览任务｜模型新近况",
+        )
+
+    def test_external_title_drift_changes_model_owned_title_to_manual(self):
+        self.app.state.title_generator = FixedTitleGenerator("模型总览｜模型近况")
+        self.call_endpoint("/sessions/{session_id}/auto-rename", session_id="abc123")
+        self.replace_thread_name("abc123", "alpha｜外部人工总览任务｜外部近况")
+        self.append_user_message("abc123", "外部 /rename 后继续对话")
+        self.app.state.title_generator = FixedTitleGenerator("模型新总览｜模型新近况")
+
+        self.call_endpoint("/sessions/{session_id}/recommend", session_id="abc123")
+
+        detail = self.app.state.store.get_session("abc123")
+        cache = self.read_title_cache()
+        self.assertEqual(
+            cache[f"session:{detail.id}"],
+            "外部人工总览任务｜模型新近况",
+        )
+        self.assertEqual(
+            cache[f"recommendation-owner:{detail.content_cache_key}"],
+            "manual",
+        )
+
+    def test_external_short_title_drift_is_still_manual_owned(self):
+        self.app.state.title_generator = FixedTitleGenerator("模型总览｜模型近况")
+        self.call_endpoint("/sessions/{session_id}/auto-rename", session_id="abc123")
+        self.replace_thread_name("abc123", "外部短标题")
+
+        self.call_endpoint("/sessions/{session_id}/recommend", session_id="abc123")
+
+        detail = self.app.state.store.get_session("abc123")
+        cache = self.read_title_cache()
+        self.assertEqual(
+            cache[f"recommendation-owner:{detail.content_cache_key}"],
+            "manual",
+        )
+
+    def test_auto_rename_remerges_cached_recommendation_after_external_drift(self):
+        self.app.state.title_generator = FixedTitleGenerator("模型总览｜模型近况")
+        self.call_endpoint("/sessions/{session_id}/auto-rename", session_id="abc123")
+        self.replace_thread_name("abc123", "alpha｜外部人工总览任务｜外部近况")
+        self.app.state.title_generator = FailingTitleGenerator()
+
+        self.call_endpoint("/sessions/{session_id}/auto-rename", session_id="abc123")
+
+        self.assertIn(
+            '"thread_name":"alpha｜外部人工总览任务｜模型近况"',
+            self.index_path.read_text(encoding="utf-8"),
+        )
+        cache = self.read_title_cache()
+        self.assertEqual(cache["overall-owner:abc123"], "manual")
+        self.assertEqual(
+            cache["applied-title:abc123"],
+            "alpha｜外部人工总览任务｜模型近况",
+        )
+
+    def test_unknown_stored_owner_fails_conservatively_to_manual(self):
+        self.app.state.title_generator = FixedTitleGenerator("模型总览｜模型近况")
+        self.call_endpoint("/sessions/{session_id}/auto-rename", session_id="abc123")
+        cache_path = self.codex_home / "session-renamer-title-cache.json"
+        cache = self.read_title_cache()
+        cache["overall-owner:abc123"] = "unknown"
+        cache_path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        self.app.state.title_generator = FixedTitleGenerator("新模型总览｜新模型近况")
+
+        self.call_endpoint("/sessions/{session_id}/recommend", session_id="abc123")
+
+        detail = self.app.state.store.get_session("abc123")
+        cache = self.read_title_cache()
+        self.assertEqual(cache["session:abc123"], "模型总览任务｜新模型近况")
+        self.assertEqual(
+            cache[f"recommendation-owner:{detail.content_cache_key}"],
+            "manual",
+        )
+
+    def test_legacy_exact_cached_recommendation_is_inferred_model_owned(self):
+        legacy_title = "alpha｜旧模型总览任务｜旧模型近况"
+        self.replace_thread_name("abc123", legacy_title)
+        (self.codex_home / "session-renamer-title-cache.json").write_text(
+            json.dumps(
+                {"session:abc123": "旧模型总览任务｜旧模型近况"},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        self.app = create_app(
+            store=SessionStore(self.index_path, self.codex_home),
+            access_token="secret",
+            title_generator=FixedTitleGenerator("新模型总览｜新模型近况"),
+        )
+
+        self.call_endpoint("/sessions/{session_id}/recommend", session_id="abc123")
+
+        self.assertEqual(
+            self.read_title_cache()["session:abc123"],
+            "新模型总览任务｜新模型近况",
+        )
+
+    def test_legacy_unknown_three_level_title_is_inferred_manual_owned(self):
+        self.replace_thread_name("abc123", "alpha｜未知来源总览任务｜旧近况")
+        self.app = create_app(
+            store=SessionStore(self.index_path, self.codex_home),
+            access_token="secret",
+            title_generator=FixedTitleGenerator("新模型总览｜新模型近况"),
+        )
+
+        self.call_endpoint("/sessions/{session_id}/recommend", session_id="abc123")
+
+        self.assertEqual(
+            self.read_title_cache()["session:abc123"],
+            "未知来源总览任务｜新模型近况",
+        )
+
+    def test_exact_form_recommendation_inherits_owner_but_edited_value_is_manual(self):
+        self.app.state.title_generator = FixedTitleGenerator("推荐总览｜推荐近况")
+        self.call_endpoint("/sessions/{session_id}/recommend", session_id="abc123")
+        recommendation = f"alpha｜{self.read_title_cache()['session:abc123']}"
+
+        self.call_endpoint(
+            "/sessions/{session_id}/rename",
+            body=urlencode({"thread_name": recommendation}),
+            headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+            session_id="abc123",
+        )
+        cache = self.read_title_cache()
+        self.assertEqual(cache["overall-owner:abc123"], "model")
+        self.assertEqual(cache["applied-title:abc123"], recommendation)
+
+        edited = "alpha｜编辑后的总览任务｜推荐近况"
+        self.call_endpoint(
+            "/sessions/{session_id}/rename",
+            body=urlencode({"thread_name": edited}),
+            headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+            session_id="abc123",
+        )
+        cache = self.read_title_cache()
+        self.assertEqual(cache["overall-owner:abc123"], "manual")
+        self.assertEqual(cache["applied-title:abc123"], edited)
+
+    def test_single_and_bulk_auto_rename_store_model_ownership(self):
+        self.call_endpoint("/sessions/{session_id}/auto-rename", session_id="abc123")
+        cache = self.read_title_cache()
+        self.assertEqual(cache["overall-owner:abc123"], "model")
+        self.assertEqual(
+            cache["applied-title:abc123"],
+            "alpha｜Codex会话管理工具任务｜Codex会话管理工具",
+        )
+
+        self.call_endpoint("/auto-rename-all")
+        cache = self.read_title_cache()
+        self.assertEqual(cache["overall-owner:def456"], "model")
+        self.assertEqual(
+            cache["applied-title:def456"],
+            "beta｜这是一个测试任务｜这是一个测试",
+        )
+
+    def test_recommend_all_and_single_recommend_preserve_manual_overall_consistently(self):
+        self.replace_thread_name("abc123", "alpha｜人工总览任务｜旧近况")
+        self.replace_thread_name("def456", "beta｜人工总览任务｜旧近况")
+        self.app = create_app(
+            store=SessionStore(self.index_path, self.codex_home),
+            access_token="secret",
+            title_generator=FixedTitleGenerator("模型总览｜模型近况"),
+        )
+
+        self.call_endpoint("/sessions/{session_id}/recommend", session_id="abc123")
+        self.call_endpoint("/recommend-all")
+
+        cache = self.read_title_cache()
+        self.assertEqual(
+            cache["session:abc123"],
+            "人工总览任务｜模型近况",
+        )
+        self.assertEqual(
+            cache["session:def456"],
+            "人工总览任务｜模型近况",
         )
 
     def test_list_page_can_search_by_current_title(self):
