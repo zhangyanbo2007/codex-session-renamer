@@ -199,9 +199,7 @@ def _overall_title_failure(title: str) -> str:
     return ""
 
 
-_PATH_TOKEN_BOUNDARY = (
-    r"(?:^|[\s,，、;；:：=＝(（\[【{｛<〈《「『\"'“‘\-‐‑‒–—―])"
-)
+_PATH_TOKEN_BOUNDARY = r"(?:^|[^\w])"
 _ABSOLUTE_SLASH_PATH = re.compile(_PATH_TOKEN_BOUNDARY + r"/[^/\s]")
 _WINDOWS_DRIVE_PATH = re.compile(_PATH_TOKEN_BOUNDARY + r"[A-Za-z]:[\\/]")
 _DOT_TRAVERSAL_PATH = re.compile(_PATH_TOKEN_BOUNDARY + r"\.\.?[\\/]")
