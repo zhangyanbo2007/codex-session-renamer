@@ -88,6 +88,27 @@ class TitleSuggesterTest(unittest.TestCase):
         self.assertNotIn("较短旧进度", context)
         self.assertLessEqual(len(context), 50)
 
+    def test_overall_context_truncates_long_first_task_to_keep_newest_intent(self):
+        messages = [
+            SessionMessage(role="user", text=SYSTEM_USER_RECORD, timestamp=None),
+            SessionMessage(
+                role="user",
+                text="首个任务：调查远程桌面故障" + "甲" * 100,
+                timestamp=None,
+            ),
+            SessionMessage(
+                role="user",
+                text="最新任务：验证输入法修复" + "乙" * 40,
+                timestamp=None,
+            ),
+        ]
+
+        context = overall_title_context(messages, max_tokens=1_060)
+
+        self.assertIn("首个任务：调查", context)
+        self.assertIn("最新任务：验证", context)
+        self.assertLessEqual(len(context), 60)
+
     def test_keeps_project_name_from_path_when_request_follows_it(self):
         messages = [
             SessionMessage(role="user", text=SYSTEM_USER_RECORD, timestamp=None),

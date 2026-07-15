@@ -179,11 +179,11 @@ def _parse_component(raw_title: str) -> str:
 
 _CARRIER_ONLY_TITLE = re.compile(
     r"^(?:截图|图片|图像|附件|文件|代码|日志|路径|附件名|文件名|扩展名)"
-    r"(?:分析|查看|检查|处理|整理|评估|识别|解读|修复|排查)$"
+    r"(?:分析|查看|检查|处理|整理|评估|识别|解读|修复|排查|转换|迁移|上传|"
+    r"下载|读取|解析|编辑|修改|生成|删除|审查)?$"
 )
 _FILENAME = re.compile(
-    r"[\w-]+\.(?:png|jpe?g|gif|webp|pdf|docx?|xlsx?|pptx?|txt|log|json|ya?ml|"
-    r"toml|py|js|ts|tsx|jsx|html?|css|md|csv|zip|tar|gz)",
+    r"[\w-]+\.[a-z][a-z0-9]{0,7}",
     flags=re.I,
 )
 
@@ -194,6 +194,8 @@ def _overall_title_failure(title: str) -> str:
     if not title.endswith("任务"):
         return "候选标题没有以任务结尾"
     task_object = re.sub(r"\s+", "", title[: -len("任务")])
+    if not task_object:
+        return "候选标题缺少具体任务对象"
     if "/" in task_object or "\\" in task_object or _FILENAME.search(task_object):
         return "候选标题由路径、附件名、文件名或扩展名主导"
     if _CARRIER_ONLY_TITLE.fullmatch(task_object):

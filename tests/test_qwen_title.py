@@ -205,6 +205,25 @@ class QwenTitleTest(unittest.TestCase):
         self.assertEqual(title, "暂无推荐")
         self.assertEqual(len(opener.requests), 2)
 
+    def test_overall_title_validation_rejects_generic_carriers_and_filename_shapes(self):
+        invalid_titles = (
+            "任务",
+            "截图任务",
+            "图片转换任务",
+            "schema.sql迁移任务",
+            "/tmp/schema.sql迁移任务",
+            r"C:\logs\schema.sql迁移任务",
+        )
+
+        for title in invalid_titles:
+            with self.subTest(title=title):
+                self.assertTrue(qwen_title._overall_title_failure(title))
+
+        self.assertEqual(
+            qwen_title._overall_title_failure("应急评测泛化优化任务"),
+            "",
+        )
+
     def test_model_rewrites_path_bearing_recent_draft(self):
         opener = FakeOpener(
             [

@@ -55,7 +55,11 @@ def overall_title_context(
 def _first_and_newest_lines(lines: list[str], budget: int) -> list[str]:
     if not lines or budget <= 2:
         return []
-    first = lines[0][:budget]
+    if len(lines) == 1:
+        return [lines[0][:budget]]
+    newest_reserve = min(len(lines[-1]), max(4, budget // 3))
+    first_budget = max(3, budget - newest_reserve - 1)
+    first = lines[0][:first_budget]
     selected = [first]
     remaining = budget - len(first)
     newest_lines = []
