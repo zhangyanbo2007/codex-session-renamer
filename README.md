@@ -43,7 +43,7 @@ A local web interface for reviewing, renaming, and cleaning up Codex sessions. T
 
 ### Performance and privacy
 
-- Sends cleaned conversation context to the configured model provider only through an explicit recommendation or auto-rename action, or an authenticated suggestion-API request. Passive list and detail refreshes do not send it.
+- Sends cleaned conversation context to the configured model provider only through an explicit recommendation or auto-rename action, or any explicit suggestion-API request. Passive list and detail refreshes do not send it. Suggestion-API authentication depends on whether the deployment uses an application token, an authenticated proxy, or tokenless mode.
 - Caches recommendations and log metadata to avoid repeatedly parsing unchanged session files.
 - Loads full conversation details only for detail pages, content search, changed-session filtering, and title generation.
 - Supports an optional application access token for every session-management page and action.
@@ -217,7 +217,7 @@ When `SESSION_RENAMER_PUBLIC_URL` is configured, `status` checks it directly wit
 - Deletion changes Codex indexes and moves logs into a local trash directory; verify the selected directory and search filters first.
 - Tokenless mode disables application authentication. Keep the default loopback bind unless every public management route is protected by an authenticated HTTPS reverse proxy.
 - A token in a query string may appear in browser history and intermediary logs. Use a private network and rotate the token if it may have been exposed.
-- Cleaned conversation context may be sent to the configured model provider only by an explicit recommendation or auto-rename action, or an authenticated suggestion-API request. Passive list and detail refreshes do not send it.
+- Cleaned conversation context may be sent to the configured model provider only by an explicit recommendation or auto-rename action, or any explicit suggestion-API request. Passive list and detail refreshes do not send it. Suggestion-API authentication depends on whether the deployment uses an application token, an authenticated proxy, or tokenless mode.
 
 ## Development
 

@@ -96,6 +96,43 @@ class QwenTitleTest(unittest.TestCase):
                 )
                 self.assertEqual(len(opener.requests), failure_call)
 
+    def test_invalid_recent_review_does_not_use_unreviewed_draft(self):
+        messages = [
+            SessionMessage(role="user", text="系统记录", timestamp=None),
+            SessionMessage(role="user", text="整理浏览器书签", timestamp=None),
+            SessionMessage(role="assistant", text="准备按项目分类。", timestamp=None),
+        ]
+
+        for rewritten_recent in ("", "暂无推荐"):
+            with self.subTest(rewritten_recent=rewritten_recent):
+                opener = FakeOpener(
+                    [
+                        {
+                            "choices": [
+                                {"message": {"content": "浏览器书签整理任务"}}
+                            ]
+                        },
+                        {
+                            "choices": [
+                                {
+                                    "message": {
+                                        "content": '{"acceptable": true, "title": "浏览器书签整理任务"}'
+                                    }
+                                }
+                            ]
+                        },
+                        {"choices": [{"message": {"content": "按项目整理书签"}}]},
+                        {"choices": [{"message": {"content": rewritten_recent}}]},
+                    ]
+                )
+                generator = QwenTitleGenerator(api_key="test-key", opener=opener)
+
+                self.assertEqual(
+                    generator.suggest(messages, fallback="旧标题"),
+                    "暂无推荐",
+                )
+                self.assertEqual(len(opener.requests), 4)
+
     def test_api_key_is_not_loaded_from_parent_project_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             package_file = Path(tmp) / "a" / "b" / "c" / "qwen_title.py"

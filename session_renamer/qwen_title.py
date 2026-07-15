@@ -122,7 +122,9 @@ class QwenTitleGenerator:
         )
         if rewritten_recent is None:
             return "暂无推荐"
-        recent_title = _parse_component(rewritten_recent) or recent_title
+        recent_title = _parse_component(rewritten_recent)
+        if not recent_title:
+            return "暂无推荐"
         return format_combined_title(overall_title, recent_title)
 
     def _complete(self, system_prompt: str, user_prompt: str) -> str | None:
