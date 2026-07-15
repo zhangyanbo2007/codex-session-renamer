@@ -60,7 +60,41 @@ class QwenTitleTest(unittest.TestCase):
                 generator = QwenTitleGenerator(
                     api_key="test-key", opener=FakeOpener(payload)
                 )
-                self.assertEqual(generator._complete("system", "user"), "")
+                self.assertIsNone(generator._complete("system", "user"))
+
+    def test_each_required_call_failure_returns_no_recommendation_immediately(self):
+        successful_payloads = [
+            {"choices": [{"message": {"content": "浏览器书签整理任务"}}]},
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"acceptable": true, "title": "浏览器书签整理任务"}'
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"message": {"content": "按项目整理书签"}}]},
+            {"choices": [{"message": {"content": "按项目整理书签"}}]},
+        ]
+        messages = [
+            SessionMessage(role="user", text="系统记录", timestamp=None),
+            SessionMessage(role="user", text="整理浏览器书签", timestamp=None),
+            SessionMessage(role="assistant", text="准备按项目分类。", timestamp=None),
+        ]
+
+        for failure_call in range(1, 5):
+            with self.subTest(failure_call=failure_call):
+                payloads = list(successful_payloads)
+                payloads[failure_call - 1] = {}
+                opener = FakeOpener(payloads)
+                generator = QwenTitleGenerator(api_key="test-key", opener=opener)
+
+                self.assertEqual(
+                    generator.suggest(messages, fallback="旧标题"),
+                    "暂无推荐",
+                )
+                self.assertEqual(len(opener.requests), failure_call)
 
     def test_api_key_is_not_loaded_from_parent_project_env(self):
         with tempfile.TemporaryDirectory() as tmp:

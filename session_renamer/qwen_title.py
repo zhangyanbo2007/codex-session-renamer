@@ -72,6 +72,8 @@ class QwenTitleGenerator:
             overall_system_prompt,
             overall_user_prompt,
         )
+        if raw_overall is None:
+            return "暂无推荐"
         raw_review = self._complete(
             (
                 "你是 Codex 会话整体任务标题质量审校器。审查候选，并在必要时直接纠正。"
@@ -88,6 +90,8 @@ class QwenTitleGenerator:
             ),
             f"初始候选：{raw_overall}\n\n{overall_user_prompt}",
         )
+        if raw_review is None:
+            return "暂无推荐"
         overall_title = _parse_overall_review(raw_review)
         if not overall_title:
             return "暂无推荐"
@@ -102,6 +106,8 @@ class QwenTitleGenerator:
             ),
             f"整体任务：{overall_title}\n\n{recent_context}",
         )
+        if raw_recent is None:
+            return "暂无推荐"
         recent_title = _parse_component(raw_recent)
         if not recent_title:
             return "暂无推荐"
@@ -114,10 +120,12 @@ class QwenTitleGenerator:
             ),
             f"整体任务：{overall_title}\n最近状态草稿：{recent_title}",
         )
+        if rewritten_recent is None:
+            return "暂无推荐"
         recent_title = _parse_component(rewritten_recent) or recent_title
         return format_combined_title(overall_title, recent_title)
 
-    def _complete(self, system_prompt: str, user_prompt: str) -> str:
+    def _complete(self, system_prompt: str, user_prompt: str) -> str | None:
         payload = {
             "model": self.model,
             "enable_thinking": False,
@@ -150,8 +158,8 @@ class QwenTitleGenerator:
             OSError,
             urllib.error.URLError,
         ):
-            return ""
-        return raw_title if isinstance(raw_title, str) else ""
+            return None
+        return raw_title if isinstance(raw_title, str) else None
 
 
 def create_title_generator() -> TitleGenerator:
