@@ -75,20 +75,24 @@ class QwenTitleGenerator:
             overall_system_prompt,
             overall_user_prompt,
         )
-        overall_title = _parse_component(raw_overall)
-        failure_reason = _overall_title_failure(overall_title)
-        if failure_reason:
-            raw_overall = self._complete(
-                (
-                    f"你是 Codex 会话整体任务标题纠错器。上次标题不合格：{failure_reason}。"
-                    "只输出一个修正后的自然任务名称，必须以“任务”结尾。"
-                    "路径、附件名、文件名、扩展名、截图、图片、文件、代码和日志只是输入载体，"
-                    "必须从同一会话线索中提炼具体任务对象和动作。"
-                ),
-                f"上次候选：{raw_overall}\n\n{overall_user_prompt}",
-            )
-            overall_title = _parse_component(raw_overall)
-        if _overall_title_failure(overall_title):
+        raw_review = self._complete(
+            (
+                "你是 Codex 会话整体任务标题质量审校器。审查候选，并在必要时直接纠正。"
+                "必须只输出严格 JSON 对象，不要 Markdown 或解释，格式为："
+                '{"acceptable": true, "title": "具体任务标题任务"}。'
+                "acceptable 必须是布尔值，title 必须是字符串并以“任务”结尾。"
+                "路径、附件名、文件名、扩展名、截图、图片、文件、代码和日志可能只是输入载体；"
+                "要结合会话证据区分纯载体与真正具体的产品、系统、仓库、服务器或编辑器对象。"
+                "应拒绝或改写：screenshot.png任务、截图分析任务、日志诊断任务。"
+                "可接受：Node.js升级任务、Vue.js迁移任务、代码仓库迁移任务、"
+                "文件服务器修复任务、图片编辑器开发任务。"
+                "如果能依据同一证据纠正为具体标题，返回 acceptable=true 和纠正后的 title；"
+                "如果证据不足以得到合格标题，返回 acceptable=false 和空 title。"
+            ),
+            f"初始候选：{raw_overall}\n\n{overall_user_prompt}",
+        )
+        overall_title = _parse_overall_review(raw_review)
+        if not overall_title:
             return "暂无推荐"
 
         if not recent_context:
@@ -177,21 +181,6 @@ def _parse_component(raw_title: str) -> str:
     return title
 
 
-_CHINESE_CARRIER_TITLE = re.compile(
-    r"^(?:附件名|文件名|扩展名|截图|图片|图像|附件|文件|代码|日志|路径)"
-    r"[\u3400-\u9fff]*$"
-)
-_ENGLISH_CARRIER_TITLE = re.compile(
-    r"^(?:screenshot|image|picture|attachment|file|code|log|path|filename|extension)"
-    r"[a-z]*$",
-    flags=re.I,
-)
-_DOTTED_NAME = re.compile(
-    r"(?<![a-z0-9_-])([a-z0-9_-]+)\.([a-z][a-z0-9]{0,7})",
-    flags=re.I,
-)
-
-
 def _overall_title_failure(title: str) -> str:
     if not title:
         return "候选标题为空"
@@ -200,27 +189,24 @@ def _overall_title_failure(title: str) -> str:
     task_object = re.sub(r"\s+", "", title[: -len("任务")])
     if not task_object:
         return "候选标题缺少具体任务对象"
-    if "/" in task_object or "\\" in task_object or _has_filename_shape(task_object):
-        return "候选标题由路径、附件名、文件名或扩展名主导"
-    if _is_carrier_dominated(task_object):
-        return "候选标题只有通用输入载体和通用动作"
+    if "/" in task_object or "\\" in task_object:
+        return "候选标题包含路径分隔符"
     return ""
 
 
-def _has_filename_shape(task_object: str) -> bool:
-    for match in _DOTTED_NAME.finditer(task_object):
-        basename = match.group(1)
-        letters = "".join(character for character in basename if character.isalpha())
-        if not letters or letters.islower() or letters.isupper():
-            return True
-    return False
-
-
-def _is_carrier_dominated(task_object: str) -> bool:
-    return bool(
-        _CHINESE_CARRIER_TITLE.fullmatch(task_object)
-        or _ENGLISH_CARRIER_TITLE.fullmatch(task_object)
-    )
+def _parse_overall_review(raw_review: str) -> str:
+    try:
+        review = json.loads(raw_review)
+    except (TypeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(review, dict) or set(review) != {"acceptable", "title"}:
+        return ""
+    if type(review["acceptable"]) is not bool or not isinstance(review["title"], str):
+        return ""
+    if not review["acceptable"]:
+        return ""
+    title = _parse_component(review["title"])
+    return "" if _overall_title_failure(title) else title
 
 
 def _env_value(*names: str) -> str:

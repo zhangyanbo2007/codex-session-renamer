@@ -66,11 +66,19 @@ class QwenTitleTest(unittest.TestCase):
                     "choices": [
                         {
                             "message": {
-                                "content": "按项目分组书签；确认分类方案"
+                                "content": json.dumps(
+                                    {
+                                        "acceptable": True,
+                                        "title": "整理浏览器书签任务",
+                                    },
+                                    ensure_ascii=False,
+                                )
                             }
                         }
                     ]
                 },
+                {"choices": [{"message": {"content": "按项目分组书签；确认分类方案"}}]},
+                {"choices": [{"message": {"content": "按项目分组书签；确认分类方案"}}]},
             ]
         )
         generator = QwenTitleGenerator(api_key="test-key", opener=opener)
@@ -97,9 +105,10 @@ class QwenTitleTest(unittest.TestCase):
         )
 
         self.assertEqual(title, "整理浏览器书签任务｜按项目分组书签；确认分类方案")
-        self.assertEqual(len(opener.requests), 3)
+        self.assertEqual(len(opener.requests), 4)
         overall_body = json.loads(opener.requests[0][0].data.decode("utf-8"))
-        recent_body = json.loads(opener.requests[1][0].data.decode("utf-8"))
+        review_body = json.loads(opener.requests[1][0].data.decode("utf-8"))
+        recent_body = json.loads(opener.requests[2][0].data.decode("utf-8"))
         self.assertEqual(overall_body["model"], "qwen3.5-flash")
         self.assertFalse(overall_body["enable_thinking"])
         self.assertIn("具体对象+工作动作或目标+任务", overall_body["messages"][0]["content"])
@@ -110,6 +119,20 @@ class QwenTitleTest(unittest.TestCase):
         self.assertIn("旧标题", overall_body["messages"][1]["content"])
         self.assertNotIn("/home/example", overall_body["messages"][1]["content"])
         self.assertNotIn("系统记录", overall_body["messages"][1]["content"])
+        review_prompt = review_body["messages"][0]["content"]
+        self.assertIn("严格 JSON", review_prompt)
+        self.assertIn("screenshot.png任务", review_prompt)
+        self.assertIn("截图分析任务", review_prompt)
+        self.assertIn("日志诊断任务", review_prompt)
+        self.assertIn("Node.js升级任务", review_prompt)
+        self.assertIn("Vue.js迁移任务", review_prompt)
+        self.assertIn("代码仓库迁移任务", review_prompt)
+        self.assertIn("文件服务器修复任务", review_prompt)
+        self.assertIn("图片编辑器开发任务", review_prompt)
+        self.assertIn(
+            overall_body["messages"][1]["content"],
+            review_body["messages"][1]["content"],
+        )
         self.assertIn("整理浏览器书签任务", recent_body["messages"][1]["content"])
         self.assertIn("最近2轮", recent_body["messages"][1]["content"])
         self.assertIn("不能照抄", recent_body["messages"][0]["content"])
@@ -118,6 +141,15 @@ class QwenTitleTest(unittest.TestCase):
         opener = FakeOpener(
             [
                 {"choices": [{"message": {"content": "远程桌面输入法状态评估任务"}}]},
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"acceptable": true, "title": "远程桌面输入法状态评估任务"}'
+                            }
+                        }
+                    ]
+                },
                 {"choices": [{"message": {"content": "确认控制端输入法归属"}}]},
                 {"choices": [{"message": {"content": "确认控制端输入法归属"}}]},
             ]
@@ -148,7 +180,15 @@ class QwenTitleTest(unittest.TestCase):
         opener = FakeOpener(
             [
                 {"choices": [{"message": {"content": "screenshot-20260714-024720.png任务"}}]},
-                {"choices": [{"message": {"content": "远程桌面输入法状态评估任务"}}]},
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"acceptable": true, "title": "远程桌面输入法状态评估任务"}'
+                            }
+                        }
+                    ]
+                },
                 {"choices": [{"message": {"content": "确认控制端输入法归属"}}]},
                 {"choices": [{"message": {"content": "确认控制端输入法归属"}}]},
             ]
@@ -175,18 +215,26 @@ class QwenTitleTest(unittest.TestCase):
         self.assertEqual(len(opener.requests), 4)
         first_body = json.loads(opener.requests[0][0].data.decode("utf-8"))
         retry_body = json.loads(opener.requests[1][0].data.decode("utf-8"))
-        self.assertIn("文件名", retry_body["messages"][0]["content"])
+        self.assertIn("质量审校", retry_body["messages"][0]["content"])
         self.assertIn("screenshot-20260714-024720.png任务", retry_body["messages"][1]["content"])
         self.assertIn(
             first_body["messages"][1]["content"],
             retry_body["messages"][1]["content"],
         )
 
-    def test_two_invalid_overall_titles_return_no_recommendation_without_recent_calls(self):
+    def test_unacceptable_overall_review_returns_no_recommendation_without_recent_calls(self):
         opener = FakeOpener(
             [
                 {"choices": [{"message": {"content": "截图分析任务"}}]},
-                {"choices": [{"message": {"content": "report.log检查任务"}}]},
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"acceptable": false, "title": "远程鉴权故障诊断任务"}'
+                            }
+                        }
+                    ]
+                },
             ]
         )
         generator = QwenTitleGenerator(api_key="test-key", opener=opener)
@@ -205,15 +253,31 @@ class QwenTitleTest(unittest.TestCase):
         self.assertEqual(title, "暂无推荐")
         self.assertEqual(len(opener.requests), 2)
 
-    def test_overall_title_validation_rejects_generic_carriers_and_filename_shapes(self):
+    def test_malformed_overall_review_returns_no_recommendation_without_recent_calls(self):
+        opener = FakeOpener(
+            [
+                {"choices": [{"message": {"content": "Node.js升级任务"}}]},
+                {"choices": [{"message": {"content": "not valid json"}}]},
+            ]
+        )
+        generator = QwenTitleGenerator(api_key="test-key", opener=opener)
+
+        title = generator.suggest(
+            [
+                SessionMessage(role="user", text="系统记录", timestamp=None),
+                SessionMessage(role="user", text="升级 Node.js", timestamp=None),
+            ],
+            fallback="Node.js",
+        )
+
+        self.assertEqual(title, "暂无推荐")
+        self.assertEqual(len(opener.requests), 2)
+
+    def test_structural_validation_does_not_decide_carrier_or_product_semantics(self):
         invalid_titles = (
+            "",
             "任务",
-            "截图任务",
-            "图片转换任务",
-            "截图校验任务",
-            "日志诊断任务",
-            "文件格式兼容性校验任务",
-            "schema.sql迁移任务",
+            "Node.js升级",
             "/tmp/schema.sql迁移任务",
             r"C:\logs\schema.sql迁移任务",
         )
@@ -227,15 +291,29 @@ class QwenTitleTest(unittest.TestCase):
             "Python代码质量检查任务",
             "Node.js升级任务",
             "Vue.js迁移任务",
+            "截图分析任务",
+            "日志诊断任务",
+            "schema.sql迁移任务",
         )
         for title in valid_titles:
             with self.subTest(title=title):
                 self.assertEqual(qwen_title._overall_title_failure(title), "")
+                review = json.dumps({"acceptable": True, "title": title})
+                self.assertEqual(qwen_title._parse_overall_review(review), title)
 
     def test_model_rewrites_path_bearing_recent_draft(self):
         opener = FakeOpener(
             [
                 {"choices": [{"message": {"content": "WorkspaceHub文件共享与权限配置任务"}}]},
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"acceptable": true, "title": "WorkspaceHub文件共享与权限配置任务"}'
+                            }
+                        }
+                    ]
+                },
                 {
                     "choices": [
                         {
@@ -267,8 +345,8 @@ class QwenTitleTest(unittest.TestCase):
             title,
             "WorkspaceHub文件共享与权限配置任务｜共享目录修改与服务验证",
         )
-        self.assertEqual(len(opener.requests), 3)
-        rewrite_body = json.loads(opener.requests[2][0].data.decode("utf-8"))
+        self.assertEqual(len(opener.requests), 4)
+        rewrite_body = json.loads(opener.requests[3][0].data.decode("utf-8"))
         self.assertIn("修改 WorkspaceHub 共享目录", rewrite_body["messages"][1]["content"])
         self.assertIn("只保留抽象工作状态", rewrite_body["messages"][0]["content"])
 
