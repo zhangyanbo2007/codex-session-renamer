@@ -289,11 +289,8 @@ def create_app(
             detail = app.state.store.get_session(session_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
-        refresh_title_cache_from_disk()
-        suggested_title = suggested_title_for(
-            detail,
-            persist=False,
-        )
+        title_cache = refresh_title_cache_from_disk()
+        suggested_title = passive_title_for(detail, title_cache)
         can_use_suggestion = _is_actionable_title(suggested_title)
         response = TEMPLATES.TemplateResponse(
             request,
@@ -345,7 +342,11 @@ def create_app(
             title_cache = refresh_title_cache_from_disk()
             recommended_title = cached_title_for(detail, title_cache)
             owner = "manual"
-            if recommended_title and new_title == recommended_title:
+            if (
+                recommended_title
+                and _canonical_full_title(new_title, detail.cwd)
+                == _canonical_full_title(recommended_title, detail.cwd)
+            ):
                 recommendation_owner = title_cache.get(
                     f"recommendation-owner:{_title_cache_key(detail)}"
                 )
@@ -473,6 +474,14 @@ def create_app(
         if not cached:
             return None
         return _title_with_directory_prefix(detail.cwd, cached)
+
+    def passive_title_for(detail, title_cache: dict[str, str]) -> str:
+        cached = cached_title_for(detail, title_cache)
+        if not cached:
+            return _sanitize_title(detail.thread_name)
+        if _overall_owner_for(detail, title_cache) == "manual":
+            return _merge_existing_summary(detail.thread_name, cached, detail.cwd)
+        return cached
 
     def suggested_title_for(
         detail,

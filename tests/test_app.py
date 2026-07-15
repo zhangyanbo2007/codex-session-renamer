@@ -253,6 +253,18 @@ class AppTest(unittest.TestCase):
             )
         )
 
+    def title_cache_or_empty(self):
+        cache_path = self.codex_home / "session-renamer-title-cache.json"
+        if not cache_path.exists():
+            return {}
+        return json.loads(cache_path.read_text(encoding="utf-8"))
+
+    def assert_no_applied_provenance(self, *session_ids):
+        cache = self.title_cache_or_empty()
+        for session_id in session_ids:
+            for prefix in ("applied-content", "applied-title", "overall-owner"):
+                self.assertNotIn(f"{prefix}:{session_id}", cache)
+
     def replace_thread_name(self, session_id, thread_name):
         records = []
         for line in self.index_path.read_text(encoding="utf-8").splitlines():
@@ -951,6 +963,135 @@ class AppTest(unittest.TestCase):
         self.assertEqual(cache["overall-owner:abc123"], "manual")
         self.assertEqual(cache["applied-title:abc123"], edited)
 
+    def test_canonically_equal_form_recommendation_inherits_owner(self):
+        self.app.state.title_generator = FixedTitleGenerator("推荐总览｜推荐近况")
+        self.call_endpoint("/sessions/{session_id}/recommend", session_id="abc123")
+
+        self.call_endpoint(
+            "/sessions/{session_id}/rename",
+            body=urlencode(
+                {"thread_name": "  alpha ｜ 推荐总览任务 ｜ 推荐近况  "}
+            ),
+            headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+            session_id="abc123",
+        )
+
+        cache = self.read_title_cache()
+        self.assertEqual(cache["overall-owner:abc123"], "model")
+        self.assertEqual(
+            cache["applied-title:abc123"],
+            "alpha｜推荐总览任务｜推荐近况",
+        )
+
+    def test_manual_recommendation_owner_survives_single_and_bulk_auto_apply(self):
+        for session_id, title in (
+            ("abc123", "alpha｜人工甲总览任务｜旧近况"),
+            ("def456", "beta｜人工乙总览任务｜旧近况"),
+        ):
+            self.call_endpoint(
+                "/sessions/{session_id}/rename",
+                body=urlencode({"thread_name": title}),
+                headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+                session_id=session_id,
+            )
+        self.app.state.title_generator = FixedTitleGenerator("模型总览｜模型近况")
+
+        self.call_endpoint("/sessions/{session_id}/auto-rename", session_id="abc123")
+        self.call_endpoint("/auto-rename-all")
+
+        cache = self.read_title_cache()
+        self.assertEqual(cache["overall-owner:abc123"], "manual")
+        self.assertEqual(cache["overall-owner:def456"], "manual")
+        for session_id in ("abc123", "def456"):
+            detail = self.app.state.store.get_session(session_id)
+            self.assertEqual(
+                cache[f"recommendation-owner:{detail.content_cache_key}"],
+                "manual",
+            )
+        self.assertEqual(
+            cache["applied-title:abc123"],
+            "alpha｜人工甲总览任务｜模型近况",
+        )
+        self.assertEqual(
+            cache["applied-title:def456"],
+            "beta｜人工乙总览任务｜模型近况",
+        )
+
+    def test_invalid_form_apply_does_not_write_applied_provenance(self):
+        with self.assertRaises(HTTPException) as raised:
+            self.call_endpoint(
+                "/sessions/{session_id}/rename",
+                body=urlencode({"thread_name": "   "}),
+                headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+                session_id="abc123",
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assert_no_applied_provenance("abc123")
+
+    def test_form_store_failure_does_not_write_applied_provenance(self):
+        def fail_rename(_session_id, _title):
+            raise ValueError("rename failed")
+
+        self.app.state.store.rename_session = fail_rename
+
+        with self.assertRaises(HTTPException) as raised:
+            self.call_endpoint(
+                "/sessions/{session_id}/rename",
+                body=urlencode({"thread_name": "有效新标题"}),
+                headers=[(b"content-type", b"application/x-www-form-urlencoded")],
+                session_id="abc123",
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assert_no_applied_provenance("abc123")
+
+    def test_single_auto_no_actionable_suggestion_writes_no_applied_provenance(self):
+        self.app.state.title_generator = FixedTitleGenerator("未命名会话")
+
+        response = self.call_endpoint(
+            "/sessions/{session_id}/auto-rename",
+            session_id="abc123",
+        )
+
+        self.assertEqual(response.status_code, 303)
+        self.assert_no_applied_provenance("abc123")
+
+    def test_single_auto_store_failure_writes_no_applied_provenance(self):
+        def fail_rename(_session_id, _title):
+            raise ValueError("rename failed")
+
+        self.app.state.store.rename_session = fail_rename
+
+        with self.assertRaises(HTTPException) as raised:
+            self.call_endpoint(
+                "/sessions/{session_id}/auto-rename",
+                session_id="abc123",
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assert_no_applied_provenance("abc123")
+
+    def test_bulk_auto_no_actionable_suggestions_write_no_applied_provenance(self):
+        self.app.state.title_generator = FixedTitleGenerator("未命名会话")
+
+        response = self.call_endpoint("/auto-rename-all")
+
+        self.assertEqual(response.status_code, 303)
+        self.assert_no_applied_provenance("abc123", "def456")
+
+    def test_bulk_auto_store_failure_writes_no_applied_provenance(self):
+        def fail_rename_all(_titles_by_id):
+            raise ValueError("bulk rename failed")
+
+        self.app.state.store.rename_sessions = fail_rename_all
+
+        with self.assertRaises(HTTPException) as raised:
+            self.call_endpoint("/auto-rename-all")
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assert_no_applied_provenance("abc123", "def456")
+
     def test_single_and_bulk_auto_rename_store_model_ownership(self):
         self.call_endpoint("/sessions/{session_id}/auto-rename", session_id="abc123")
         cache = self.read_title_cache()
@@ -1244,6 +1385,46 @@ class AppTest(unittest.TestCase):
         self.assertIn('class="detail-actions"', text)
         self.assertNotIn("任务线索", text)
         self.assertNotIn('class="preview-block"', text)
+
+    def test_passive_detail_uses_cached_recommendation_without_generator_call(self):
+        self.replace_thread_name("abc123", "alpha｜人工总览任务｜人工近况")
+        (self.codex_home / "session-renamer-title-cache.json").write_text(
+            json.dumps(
+                {"session:abc123": "旧模型总览任务｜缓存近况"},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        generator = CountingTitleGenerator("不应调用｜不应生成")
+        self.app = create_app(
+            store=SessionStore(self.index_path, self.codex_home),
+            access_token="secret",
+            title_generator=generator,
+        )
+
+        response = self.call_endpoint(
+            "/sessions/{session_id}", method="GET", session_id="abc123"
+        )
+        text = self.response_text(response, path="/sessions/abc123")
+
+        self.assertEqual(generator.calls, 0)
+        self.assertIn("alpha｜人工总览任务｜缓存近况", text)
+
+    def test_passive_detail_without_cache_uses_current_title_without_generator_call(self):
+        generator = CountingTitleGenerator("不应调用｜不应生成")
+        self.app = create_app(
+            store=SessionStore(self.index_path, self.codex_home),
+            access_token="secret",
+            title_generator=generator,
+        )
+
+        response = self.call_endpoint(
+            "/sessions/{session_id}", method="GET", session_id="abc123"
+        )
+        text = self.response_text(response, path="/sessions/abc123")
+
+        self.assertEqual(generator.calls, 0)
+        self.assertIn('name="thread_name" value="旧标题"', text)
 
     def test_detail_single_recommend_prefills_rename_input(self):
         store = SessionStore(self.index_path, self.codex_home)
