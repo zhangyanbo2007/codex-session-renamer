@@ -18,6 +18,7 @@ from starlette.requests import Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from session_renamer import __version__
 from session_renamer.app import create_app, _list_url, _merge_existing_summary
 from session_renamer.store import SessionStore
 
@@ -379,7 +380,7 @@ class AppTest(unittest.TestCase):
         self.assertIn("一键全部改名", text)
         self.assertIn("一键标题推荐", text)
         self.assertIn("删除会话", text)
-        self.assertIn("v0.7.1", text)
+        self.assertIn(f"v{__version__}", text)
 
     def test_list_page_marks_sessions_not_using_model_title(self):
         response = self.call_endpoint("/", method="GET")

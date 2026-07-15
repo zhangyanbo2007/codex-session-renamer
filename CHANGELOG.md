@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## v0.8.0 - 2026-07-15
+
+### Adaptive title recommendations
+
+- Let model-owned overall task segments evolve when refreshed after conversation changes, while protecting manually authored overall segments and updating only their recent state.
+- Treat paths, filenames, screenshots, and files as evidence carriers rather than sufficient task objects, and add one structured overall semantic review/correction before recent-state generation.
+- Include recent assistant evidence and budget long sessions across their original task and latest intent within a bounded input envelope.
+- Fail closed on invalid or unacceptable model output and on model/API errors, producing no recommendation.
+
+### Passive views and cache safety
+
+- Keep passive list and detail refreshes cache-only, with no model calls.
+- Track additive recommendation and title provenance, detect titles changed outside the app, and preserve manual ownership conservatively.
+- Merge title-cache deltas under a process-safe lock so concurrent workers retain independent updates.
+
 ## v0.7.1 - 2026-07-14
 
 ### Change tracking

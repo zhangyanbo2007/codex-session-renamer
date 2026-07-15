@@ -2,7 +2,7 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-> Current version: v0.7.1
+> Current version: v0.8.0
 
 A local web interface for reviewing, renaming, and cleaning up Codex sessions. The UI is Chinese and is designed for people who maintain many sessions across multiple project directories.
 
@@ -22,10 +22,12 @@ A local web interface for reviewing, renaming, and cleaning up Codex sessions. T
 
 - Generates a three-level title: current directory, overall summary, and the most recent two-turn summary.
 - Uses `qwen3.5-flash` through the DashScope-compatible API, with thinking disabled for low-cost title generation.
-- Generates the overall task and recent two-turn state independently, then asks Qwen to review the recent-state draft and remove paths or low-value wording.
-- Caps the overall model input at a conservative 100,000-token budget.
+- With recent context, a successful recommendation uses four Qwen calls: overall generation, one structured overall quality review/correction, recent-state generation, and recent-state review. If the overall review rejects the candidate, processing stops after that review.
+- Treats paths, filenames, screenshots, and files as evidence carriers, not sufficient task objects. Invalid or unacceptable results produce no recommendation.
+- Includes recent assistant evidence and bounds the combined overall evidence within a conservative 100,000-character input envelope. The implementation reserves prompt overhead, caps recent evidence at 20,000 characters, and budgets long sessions across the original task and latest intent; this is not an exact tokenizer-based 100,000-token limit.
 - Ignores the first user environment/context record when building title context.
-- Updates recommendations only when **一键标题推荐** or **单会话标题推荐** is clicked; normal page loads do not call an AI model.
+- Allows a model-owned overall task segment to evolve when an explicit recommendation is refreshed after the conversation changes. A manually authored overall segment stays protected, so only its recent-state segment is updated.
+- Passive list and detail refreshes never call Qwen. Only explicit title actions—recommendation, auto-rename, or the suggestion API—can invoke the model.
 - Prefills each rename input with its current recommendation without applying the rename automatically.
 - Keeps recommendation generation separate from renaming, so generating recommendations does not change session count or current names.
 - Supports manual rename directly in the list and filtered bulk rename.
@@ -146,7 +148,7 @@ After opening the web interface:
 7. Use **只看未改名** for sessions without a three-level title. Use the changed-session filter for conversations updated since their last applied rename.
 8. Delete only after reviewing the session. Deleted logs are moved to `~/.codex/session-renamer-trash/` and index/database backups are created first.
 
-The title format is `current directory | overall task | recent two-turn state`. Page refreshes never invoke Qwen; recommendations are regenerated only by explicit recommendation actions.
+The title format is `current directory | overall task | recent two-turn state`. Passive list and detail refreshes never invoke Qwen; only explicit recommendation, auto-rename, or suggestion-API actions may generate a title.
 
 ## Configuration
 
@@ -224,6 +226,8 @@ Run the complete test suite:
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+The test suite uses injected fake model responses and never makes live Qwen calls.
 
 Check shell scripts and whitespace:
 
