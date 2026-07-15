@@ -2,7 +2,7 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-> Current version: v0.7.0
+> Current version: v0.7.1
 
 A local web interface for reviewing, renaming, and cleaning up Codex sessions. The UI is Chinese and is designed for people who maintain many sessions across multiple project directories.
 

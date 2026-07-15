@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## v0.7.1 - 2026-07-14
+
+### Change tracking
+
+- Only mark a session as changed after a successful rename has established an applied-content baseline.
+- Keep the changed-session result count stable when title recommendations are generated for the current filter.
+- Add regression coverage for never-renamed sessions in the changed-session filter.
+
 ## v0.7.0 - 2026-07-14
 
 ### Authentication and deployment

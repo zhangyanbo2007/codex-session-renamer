@@ -321,7 +321,7 @@ class AppTest(unittest.TestCase):
         self.assertIn("一键全部改名", text)
         self.assertIn("一键标题推荐", text)
         self.assertIn("删除会话", text)
-        self.assertIn("v0.7.0", text)
+        self.assertIn("v0.7.1", text)
 
     def test_list_page_marks_sessions_not_using_model_title(self):
         response = self.call_endpoint("/", method="GET")
@@ -480,6 +480,16 @@ class AppTest(unittest.TestCase):
         self.assertIn("释放会话变化", text)
         self.assertIn("alpha｜Codex会话管理工具任务｜Codex会话管理工具", text)
         self.assertNotIn("beta｜这是一个测试任务｜这是一个测试</a>", text)
+
+    def test_changed_filter_excludes_sessions_without_an_applied_rename_baseline(self):
+        query_string = urlencode({"token": "secret", "changed": "1"})
+
+        response = self.call_endpoint("/", method="GET", query_string=query_string)
+        text = self.response_text(response, query_string=query_string.encode("utf-8"))
+
+        self.assertIn("没有可展示的会话记录", text)
+        self.assertNotIn("旧标题</a>", text)
+        self.assertNotIn("第二个旧标题</a>", text)
 
     def test_passive_list_view_does_not_clear_changed_filter(self):
         self.call_endpoint("/auto-rename-all")

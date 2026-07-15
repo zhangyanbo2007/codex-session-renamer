@@ -754,12 +754,10 @@ def _is_model_renamed_title(title: str, cwd: str = "") -> bool:
 
 def _conversation_changed(detail, title_cache: dict[str, str]) -> bool:
     cache_key = _title_cache_key(detail)
-    if title_cache.get(f"pending-recommendation:{detail.id}") == cache_key:
-        return True
     applied_key = title_cache.get(f"applied-content:{detail.id}")
-    if applied_key:
-        return applied_key != cache_key
-    return cache_key not in title_cache
+    if not applied_key:
+        return False
+    return applied_key != cache_key
 
 
 def _build_directory_groups(rows):
