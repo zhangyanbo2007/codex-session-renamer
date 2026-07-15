@@ -11,8 +11,8 @@ from typing import Protocol
 from .store import SessionMessage
 from .title_suggester import (
     format_combined_title,
-    overall_title_context,
     recent_title_context,
+    summary_title_context,
 )
 
 
@@ -47,13 +47,10 @@ class QwenTitleGenerator:
         self.opener = opener or _default_opener()
 
     def suggest(self, messages: list[SessionMessage], fallback: str) -> str:
-        overall_context = overall_title_context(messages)
-        if not overall_context:
+        overall_evidence = summary_title_context(messages)
+        if not overall_evidence:
             return fallback
         recent_context = recent_title_context(messages)
-        overall_evidence = "\n\n".join(
-            section for section in (overall_context, recent_context) if section
-        )
         overall_system_prompt = (
             "你是 Codex 会话整体任务标题生成器。只输出一个自然的任务名称。"
             "标题必须直接标识核心任务，采用“具体对象+工作动作或目标+任务”，并以“任务”结尾。"
@@ -144,9 +141,17 @@ class QwenTitleGenerator:
             with self.opener.open(request, timeout=self.timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
             raw_title = data["choices"][0]["message"]["content"]
-        except (KeyError, json.JSONDecodeError, OSError, urllib.error.URLError):
+        except (
+            IndexError,
+            KeyError,
+            TypeError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            OSError,
+            urllib.error.URLError,
+        ):
             return ""
-        return str(raw_title)
+        return raw_title if isinstance(raw_title, str) else ""
 
 
 def create_title_generator() -> TitleGenerator:
@@ -194,7 +199,9 @@ def _overall_title_failure(title: str) -> str:
     return ""
 
 
-_PATH_TOKEN_BOUNDARY = r"(?:^|[\s:：=＝(（\[【{｛<〈《「『\"'“‘])"
+_PATH_TOKEN_BOUNDARY = (
+    r"(?:^|[\s,，、;；:：=＝(（\[【{｛<〈《「『\"'“‘\-‐‑‒–—―])"
+)
 _ABSOLUTE_SLASH_PATH = re.compile(_PATH_TOKEN_BOUNDARY + r"/[^/\s]")
 _WINDOWS_DRIVE_PATH = re.compile(_PATH_TOKEN_BOUNDARY + r"[A-Za-z]:[\\/]")
 _DOT_TRAVERSAL_PATH = re.compile(_PATH_TOKEN_BOUNDARY + r"\.\.?[\\/]")

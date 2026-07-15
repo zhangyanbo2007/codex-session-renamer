@@ -24,6 +24,8 @@ class FakeResponse:
         return False
 
     def read(self):
+        if isinstance(self.payload, bytes):
+            return self.payload
         return json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
 
 
@@ -39,6 +41,27 @@ class FakeOpener:
 
 
 class QwenTitleTest(unittest.TestCase):
+    def test_complete_fails_closed_on_malformed_response_shapes(self):
+        malformed_payloads = (
+            {},
+            {"choices": []},
+            {"choices": {}},
+            {"choices": None},
+            {"choices": [{}]},
+            {"choices": [{"message": None}]},
+            {"choices": [{"message": []}]},
+            {"choices": [{"message": {"content": None}}]},
+            {"choices": [{"message": {"content": 123}}]},
+            b"\xff\xfe",
+        )
+
+        for payload in malformed_payloads:
+            with self.subTest(payload=payload):
+                generator = QwenTitleGenerator(
+                    api_key="test-key", opener=FakeOpener(payload)
+                )
+                self.assertEqual(generator._complete("system", "user"), "")
+
     def test_api_key_is_not_loaded_from_parent_project_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             package_file = Path(tmp) / "a" / "b" / "c" / "qwen_title.py"
@@ -176,6 +199,89 @@ class QwenTitleTest(unittest.TestCase):
         self.assertIn("screenshot-20260714-024720.png", overall_evidence)
         self.assertIn("问题属于控制端输入法归属", overall_evidence)
 
+    def test_overall_and_review_requests_share_one_bounded_evidence_budget(self):
+        opener = FakeOpener(
+            [
+                {"choices": [{"message": {"content": "输入法故障排查任务"}}]},
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"acceptable": false, "title": ""}'
+                            }
+                        }
+                    ]
+                },
+            ]
+        )
+        generator = QwenTitleGenerator(api_key="test-key", opener=opener)
+
+        generator.suggest(
+            [
+                SessionMessage(role="user", text="系统记录", timestamp=None),
+                SessionMessage(
+                    role="user",
+                    text="首个任务：调查远程输入法故障" + "甲" * 90_000,
+                    timestamp=None,
+                ),
+                SessionMessage(
+                    role="user", text="最新意图：验证修复结果", timestamp=None
+                ),
+                SessionMessage(
+                    role="assistant",
+                    text="最近结论：问题属于控制端输入法归属" + "乙" * 120_000,
+                    timestamp=None,
+                ),
+            ],
+            fallback="输入法",
+        )
+
+        overall_body = json.loads(opener.requests[0][0].data.decode("utf-8"))
+        review_body = json.loads(opener.requests[1][0].data.decode("utf-8"))
+        overall_prompt = overall_body["messages"][1]["content"]
+        review_prompt = review_body["messages"][1]["content"]
+        for prompt in (overall_prompt, review_prompt):
+            self.assertLessEqual(len(prompt), 100_000)
+            self.assertIn("首个任务：调查", prompt)
+            self.assertIn("最新意图：验证修复结果", prompt)
+            self.assertIn("最近结论：问题属于控制端输入法归属", prompt)
+
+    def test_recent_generation_context_is_bounded(self):
+        opener = FakeOpener(
+            [
+                {"choices": [{"message": {"content": "输入法故障排查任务"}}]},
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": '{"acceptable": true, "title": "输入法故障排查任务"}'
+                            }
+                        }
+                    ]
+                },
+                {"choices": [{"message": {"content": "确认输入法归属"}}]},
+                {"choices": [{"message": {"content": "确认输入法归属"}}]},
+            ]
+        )
+        generator = QwenTitleGenerator(api_key="test-key", opener=opener)
+
+        generator.suggest(
+            [
+                SessionMessage(role="user", text="系统记录", timestamp=None),
+                SessionMessage(role="user", text="排查输入法", timestamp=None),
+                SessionMessage(
+                    role="assistant",
+                    text="结论：控制端输入法归属" + "乙" * 120_000,
+                    timestamp=None,
+                ),
+            ],
+            fallback="输入法",
+        )
+
+        recent_body = json.loads(opener.requests[2][0].data.decode("utf-8"))
+        self.assertLessEqual(len(recent_body["messages"][1]["content"]), 100_000)
+        self.assertIn("结论：控制端输入法归属", recent_body["messages"][1]["content"])
+
     def test_filename_dominated_overall_title_retries_once_with_same_evidence(self):
         opener = FakeOpener(
             [
@@ -285,6 +391,11 @@ class QwenTitleTest(unittest.TestCase):
             "检查:/etc配置任务",
             "检查（/etc）配置任务",
             "迁移到:/workspace任务",
+            "检查，/etc/passwd迁移任务",
+            r"检查；C:\logs\x迁移任务",
+            "检查、../secret迁移任务",
+            r"检查，\\server\share\x迁移任务",
+            r"检查-\\server\share\x迁移任务",
             r"C:\logs\schema.sql迁移任务",
             r"\\server\share\report.pdf分析任务",
             "./schema.sql迁移任务",

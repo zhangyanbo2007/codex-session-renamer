@@ -16,6 +16,7 @@ NOISE_MARKERS = (
 )
 
 INPUT_TOKEN_RESERVE = 1_000
+MAX_RECENT_CONTEXT_CHARS = 20_000
 
 
 def meaningful_user_candidates(messages: Iterable[SessionMessage]) -> list[str]:
@@ -33,16 +34,29 @@ def summary_title_context(
     messages: Iterable[SessionMessage], max_tokens: int = 100_000
 ) -> str:
     message_list = list(messages)
-    overall_section = overall_title_context(message_list, max_tokens=max_tokens)
-    recent_section = recent_title_context(message_list)
+    budget = max(0, max_tokens - INPUT_TOKEN_RESERVE)
+    recent_section = recent_title_context(
+        message_list, max_chars=min(MAX_RECENT_CONTEXT_CHARS, budget)
+    )
+    separator = 2 if recent_section else 0
+    overall_section = _overall_title_context_with_budget(
+        message_list, max(0, budget - len(recent_section) - separator)
+    )
     return "\n\n".join(section for section in (overall_section, recent_section) if section)
 
 
 def overall_title_context(
     messages: Iterable[SessionMessage], max_tokens: int = 100_000
 ) -> str:
+    return _overall_title_context_with_budget(
+        messages, max(0, max_tokens - INPUT_TOKEN_RESERVE)
+    )
+
+
+def _overall_title_context_with_budget(
+    messages: Iterable[SessionMessage], budget: int
+) -> str:
     overall_chunks = meaningful_user_candidates(messages)
-    budget = max(0, max_tokens - INPUT_TOKEN_RESERVE)
     overall_prefix = "总任务线索：\n"
     all_lines = [f"- {chunk}" for chunk in overall_chunks]
     if len(overall_prefix) + len("\n".join(all_lines)) <= budget:
@@ -77,7 +91,9 @@ def _first_and_newest_lines(lines: list[str], budget: int) -> list[str]:
     return selected
 
 
-def recent_title_context(messages: Iterable[SessionMessage]) -> str:
+def recent_title_context(
+    messages: Iterable[SessionMessage], max_chars: int = MAX_RECENT_CONTEXT_CHARS
+) -> str:
     recent_chunks = []
     for index, round_messages in enumerate(_recent_rounds(list(messages)), start=1):
         user_text = round_messages.get("user")
@@ -86,7 +102,16 @@ def recent_title_context(messages: Iterable[SessionMessage]) -> str:
             recent_chunks.append(f"第{index}轮用户：{user_text}")
         if assistant_text:
             recent_chunks.append(f"第{index}轮助手：{assistant_text}")
-    return "最近2轮：\n" + "\n".join(recent_chunks) if recent_chunks else ""
+    if not recent_chunks or max_chars <= len("最近2轮：\n"):
+        return ""
+    prefix = "最近2轮：\n"
+    full_context = prefix + "\n".join(recent_chunks)
+    if len(full_context) <= max_chars:
+        return full_context
+    available = max_chars - len(prefix) - max(0, len(recent_chunks) - 1)
+    chunk_limit = max(1, available // len(recent_chunks))
+    bounded_chunks = [chunk[:chunk_limit] for chunk in recent_chunks]
+    return (prefix + "\n".join(bounded_chunks))[:max_chars]
 
 
 def format_combined_title(overall: str, recent: str) -> str:
