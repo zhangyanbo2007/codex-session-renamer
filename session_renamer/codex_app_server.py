@@ -22,6 +22,7 @@ class CodexAppServerThreadRenamer:
         timeout: float = 15.0,
     ) -> None:
         self.codex_home = Path(codex_home)
+        self._auto_discover_binary = binary_path is None
         self.binary_path = Path(binary_path) if binary_path else _find_codex_binary()
         self.timeout = timeout
 
@@ -31,8 +32,9 @@ class CodexAppServerThreadRenamer:
 
         env = os.environ.copy()
         env["CODEX_HOME"] = str(self.codex_home)
+        binary_path = self._binary_for_launch()
         process = subprocess.Popen(
-            [str(self.binary_path), "app-server"],
+            [str(binary_path), "app-server"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -81,6 +83,16 @@ class CodexAppServerThreadRenamer:
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream is not None:
                     stream.close()
+
+    def _binary_for_launch(self) -> Path:
+        if self.binary_path.is_file():
+            return self.binary_path
+        if self._auto_discover_binary:
+            self.binary_path = _find_codex_binary()
+            return self.binary_path
+        raise CodexAppServerError(
+            f"Configured Codex binary does not exist: {self.binary_path}"
+        )
 
     def _send(self, process: subprocess.Popen[bytes], message: dict[str, Any]) -> None:
         if process.stdin is None:
